@@ -1,0 +1,795 @@
+//! Image export (PNG/WebP/JPEG/GIF/BMP/TIFF, vector SVG, Kitty graphics, Braille, ASCII) and stats.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::fs;
+use std::io::{self, Cursor, IsTerminal};
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use clap::ValueEnum;
+use image::{DynamicImage, ImageFormat, RgbaImage};
+use serde::{Deserialize, Serialize};
+
+use crate::color::Rgb;
+
+/// Maximum Base64 payload bytes per Kitty graphics protocol chunk (per Kitty spec).
+const KITTY_CHUNK_SIZE: usize = 4096;
+
+/// Supported output file and terminal formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputFormat {
+    /// Lossless PNG (recommended for crisp pixel-exact dithers).
+    #[default]
+    Png,
+    /// Lossless/lossy WebP.
+    Webp,
+    /// JPEG (flattens alpha).
+    Jpeg,
+    /// Animated-capable GIF (crisp indexed output).
+    Gif,
+    /// Uncompressed BMP.
+    Bmp,
+    /// Lossless TIFF.
+    Tiff,
+    /// Crisp vector SVG (run-length merged rects or halftone circles/dots).
+    Svg,
+    /// Pixel-exact inline terminal preview using the Kitty graphics protocol (Kitty, Ghostty, `WezTerm`).
+    Kitty,
+    /// High-density Unicode Braille text art (2x4 subpixels per glyph).
+    Braille,
+    /// Classic shaded ASCII text art.
+    Ascii,
+}
+
+/// Shape primitives used when exporting `--format svg`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SvgShape {
+    /// Horizontal run-length merged crisp pixel rectangles (smallest file size).
+    #[default]
+    Rect,
+    /// Circular stipple/halftone dots per non-background pixel.
+    Circle,
+    /// Slightly inset rounded dots with delicate spacing.
+    Dot,
+}
+
+/// Options controlling Kitty graphics protocol terminal rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KittyOptions {
+    /// Optional display width in terminal character columns (`c=`).
+    pub cols: Option<u32>,
+    /// Optional display height in terminal character rows (`r=`).
+    pub rows: Option<u32>,
+    /// Wrap escape sequences in tmux DCS passthrough (`\x1bPtmux;...\x1b\\`).
+    pub tmux_passthrough: bool,
+    /// Append a trailing newline after the final chunk (disable for exact cursor placement in fullscreen).
+    pub trailing_newline: bool,
+    /// Emit `C=1` so the terminal does not advance the text cursor after placing the image.
+    pub no_cursor_move: bool,
+    /// Optional stable Kitty image ID (`i=N,p=1`) for flicker-free atomic in-place frame updates.
+    pub image_id: Option<u32>,
+}
+
+impl Default for KittyOptions {
+    fn default() -> Self {
+        Self {
+            cols: None,
+            rows: None,
+            tmux_passthrough: false,
+            trailing_newline: true,
+            no_cursor_move: false,
+            image_id: None,
+        }
+    }
+}
+
+impl KittyOptions {
+    /// Enable tmux passthrough automatically only when running interactively inside tmux.
+    #[must_use]
+    pub fn should_use_tmux_passthrough() -> bool {
+        std::env::var_os("TMUX").is_some() && io::stdout().is_terminal()
+    }
+}
+
+/// Escape sequence that clears all Kitty graphics placements from the current screen.
+#[must_use]
+pub const fn kitty_clear_sequence(tmux_passthrough: bool) -> &'static str {
+    if tmux_passthrough {
+        "\x1bPtmux;\x1b\x1b_Ga=d,d=A,q=2\x1b\x1b\\\x1b\\"
+    } else {
+        "\x1b_Ga=d,d=A,q=2\x1b\\"
+    }
+}
+
+/// Options controlling vector SVG, Kitty graphics, and text rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ExportOptions {
+    pub format: Option<OutputFormat>,
+    pub svg_shape: SvgShape,
+    /// Skip emitting SVG shapes for the most frequent color (or explicit transparent background).
+    pub svg_skip_bg: bool,
+    /// Maximum character columns when rendering `braille` or `ascii`.
+    pub text_width: Option<u32>,
+    /// Display width in terminal columns when rendering inline with Kitty graphics (`c=`).
+    pub view_cols: Option<u32>,
+    /// Display height in terminal rows when rendering inline with Kitty graphics (`r=`).
+    pub view_rows: Option<u32>,
+}
+
+/// Per-color usage statistics returned in structured JSON output.
+#[derive(Debug, Clone, Serialize)]
+pub struct ColorUsage {
+    pub hex: String,
+    pub pixels: u64,
+    pub percent: f64,
+}
+
+impl OutputFormat {
+    /// Infer format from file extension when `--format` is not explicitly specified.
+    #[must_use]
+    pub fn infer_from_path(path: &Path) -> Self {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("webp") => Self::Webp,
+            Some("jpg" | "jpeg") => Self::Jpeg,
+            Some("gif") => Self::Gif,
+            Some("bmp") => Self::Bmp,
+            Some("tif" | "tiff") => Self::Tiff,
+            Some("svg") => Self::Svg,
+            Some("kitty") => Self::Kitty,
+            Some("braille") => Self::Braille,
+            Some("txt" | "asc" | "ascii") => Self::Ascii,
+            _ => Self::Png,
+        }
+    }
+
+    /// Canonical CLI slug.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Webp => "webp",
+            Self::Jpeg => "jpeg",
+            Self::Gif => "gif",
+            Self::Bmp => "bmp",
+            Self::Tiff => "tiff",
+            Self::Svg => "svg",
+            Self::Kitty => "kitty",
+            Self::Braille => "braille",
+            Self::Ascii => "ascii",
+        }
+    }
+
+    /// Whether this format emits UTF-8 text or terminal escape sequences directly to stdout.
+    #[must_use]
+    pub const fn is_text(self) -> bool {
+        matches!(self, Self::Svg | Self::Kitty | Self::Braille | Self::Ascii)
+    }
+}
+
+/// Compute palette color usage histogram (opaque pixels) sorted by descending frequency.
+#[must_use]
+pub fn color_histogram(img: &RgbaImage) -> Vec<ColorUsage> {
+    let mut counts: BTreeMap<[u8; 3], u64> = BTreeMap::new();
+    let mut total = 0u64;
+    for px in img.pixels() {
+        if px[3] == 0 {
+            continue;
+        }
+        *counts.entry([px[0], px[1], px[2]]).or_insert(0) += 1;
+        total += 1;
+    }
+    let denom = total.max(1) as f64;
+    let mut rows: Vec<ColorUsage> = counts
+        .into_iter()
+        .map(|(rgb, pixels)| ColorUsage {
+            hex: Rgb::new(rgb[0], rgb[1], rgb[2]).to_hex(),
+            pixels,
+            percent: ((pixels as f64 / denom) * 10_000.0).round() / 100.0,
+        })
+        .collect();
+    rows.sort_by(|a, b| b.pixels.cmp(&a.pixels).then_with(|| a.hex.cmp(&b.hex)));
+    rows
+}
+
+/// Encode `img` into raw bytes in the requested format.
+///
+/// # Errors
+/// Returns an error if the image encoder fails.
+pub fn encode_image(
+    img: &RgbaImage,
+    format: OutputFormat,
+    export: &ExportOptions,
+) -> Result<Vec<u8>> {
+    match format {
+        OutputFormat::Svg => Ok(render_svg(img, export.svg_shape, export.svg_skip_bg).into_bytes()),
+        OutputFormat::Kitty => {
+            let kitty_opts = KittyOptions {
+                cols: export.view_cols.or(export.text_width),
+                rows: export.view_rows,
+                tmux_passthrough: KittyOptions::should_use_tmux_passthrough(),
+                trailing_newline: true,
+                no_cursor_move: false,
+                image_id: None,
+            };
+            Ok(render_kitty(img, kitty_opts)?.into_bytes())
+        }
+        OutputFormat::Braille => Ok(render_braille(img, export.text_width).into_bytes()),
+        OutputFormat::Ascii => Ok(render_ascii(img, export.text_width).into_bytes()),
+        OutputFormat::Png
+        | OutputFormat::Webp
+        | OutputFormat::Jpeg
+        | OutputFormat::Gif
+        | OutputFormat::Bmp
+        | OutputFormat::Tiff => {
+            let dyn_img = if matches!(format, OutputFormat::Jpeg) {
+                DynamicImage::ImageRgba8(img.clone()).to_rgb8().into()
+            } else {
+                DynamicImage::ImageRgba8(img.clone())
+            };
+            let img_fmt = match format {
+                OutputFormat::Png => ImageFormat::Png,
+                OutputFormat::Webp => ImageFormat::WebP,
+                OutputFormat::Jpeg => ImageFormat::Jpeg,
+                OutputFormat::Gif => ImageFormat::Gif,
+                OutputFormat::Bmp => ImageFormat::Bmp,
+                OutputFormat::Tiff => ImageFormat::Tiff,
+                OutputFormat::Svg
+                | OutputFormat::Kitty
+                | OutputFormat::Braille
+                | OutputFormat::Ascii => {
+                    unreachable!("text/terminal formats handled above")
+                }
+            };
+            let mut cursor = Cursor::new(Vec::new());
+            dyn_img
+                .write_to(&mut cursor, img_fmt)
+                .with_context(|| format!("encoding {} output", format.id()))?;
+            Ok(cursor.into_inner())
+        }
+    }
+}
+
+/// Write encoded bytes to disk, creating parent directories automatically.
+///
+/// # Errors
+/// Returns an error if directories cannot be created or the file cannot be written.
+pub fn write_output_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent directory '{}'", parent.display()))?;
+    }
+    fs::write(path, bytes).with_context(|| format!("writing output file '{}'", path.display()))
+}
+
+/// Render a dithered image as a compact, crisp SVG.
+///
+/// Uses horizontal run-length merging in `Rect` mode and groups elements by color `<g fill="...">`
+/// so output files stay lean and clean for web and design tooling.
+#[must_use]
+pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
+    let w = img.width();
+    let h = img.height();
+
+    // Identify dominant opaque color for optional background rect or skip-bg omission.
+    let bg_color: Option<[u8; 3]> = {
+        let mut counts: BTreeMap<[u8; 3], u64> = BTreeMap::new();
+        let mut has_transparency = false;
+        for px in img.pixels() {
+            if px[3] < 255 {
+                has_transparency = true;
+            }
+            if px[3] > 0 {
+                *counts.entry([px[0], px[1], px[2]]).or_insert(0) += 1;
+            }
+        }
+        if has_transparency && !skip_bg {
+            None
+        } else {
+            counts
+                .into_iter()
+                .max_by_key(|&(_, c)| c)
+                .map(|(rgb, _)| rgb)
+        }
+    };
+
+    let mut out = String::with_capacity((w * h) as usize * 4);
+    let _ = writeln!(
+        out,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\" shape-rendering=\"{}\">",
+        if shape == SvgShape::Rect {
+            "crispEdges"
+        } else {
+            "geometricPrecision"
+        }
+    );
+
+    if let Some(bg) = bg_color
+        && !skip_bg
+    {
+        let hex = Rgb::new(bg[0], bg[1], bg[2]).to_hex();
+        let _ = writeln!(out, "  <rect width=\"{w}\" height=\"{h}\" fill=\"{hex}\"/>");
+    }
+
+    // Group geometry by hex color for clean, compact SVG markup.
+    let mut color_groups: BTreeMap<[u8; 3], String> = BTreeMap::new();
+
+    match shape {
+        SvgShape::Rect => {
+            for y in 0..h {
+                let mut x = 0u32;
+                while x < w {
+                    let px = *img.get_pixel(x, y);
+                    let rgb = [px[0], px[1], px[2]];
+                    if px[3] == 0 || bg_color == Some(rgb) {
+                        x += 1;
+                        continue;
+                    }
+                    let start_x = x;
+                    x += 1;
+                    while x < w {
+                        let next = *img.get_pixel(x, y);
+                        if next[3] == px[3] && [next[0], next[1], next[2]] == rgb {
+                            x += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let run_w = x - start_x;
+                    let entry = color_groups.entry(rgb).or_default();
+                    if px[3] < 255 {
+                        let op = f32::from(px[3]) / 255.0;
+                        let _ = writeln!(
+                            entry,
+                            "    <rect x=\"{start_x}\" y=\"{y}\" width=\"{run_w}\" height=\"1\" fill-opacity=\"{op:.2}\"/>"
+                        );
+                    } else {
+                        let _ = writeln!(
+                            entry,
+                            "    <rect x=\"{start_x}\" y=\"{y}\" width=\"{run_w}\" height=\"1\"/>"
+                        );
+                    }
+                }
+            }
+        }
+        SvgShape::Circle | SvgShape::Dot => {
+            let radius = if shape == SvgShape::Circle {
+                "0.48"
+            } else {
+                "0.38"
+            };
+            for y in 0..h {
+                for x in 0..w {
+                    let px = *img.get_pixel(x, y);
+                    let rgb = [px[0], px[1], px[2]];
+                    if px[3] == 0 || bg_color == Some(rgb) {
+                        continue;
+                    }
+                    let cx = x as f32 + 0.5;
+                    let cy = y as f32 + 0.5;
+                    let entry = color_groups.entry(rgb).or_default();
+                    let _ = writeln!(
+                        entry,
+                        "    <circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{radius}\"/>"
+                    );
+                }
+            }
+        }
+    }
+
+    for (rgb, body) in color_groups {
+        let hex = Rgb::new(rgb[0], rgb[1], rgb[2]).to_hex();
+        let _ = writeln!(out, "  <g fill=\"{hex}\">");
+        out.push_str(&body);
+        out.push_str("  </g>\n");
+    }
+
+    out.push_str("</svg>\n");
+    out
+}
+
+/// Render an image as high-resolution Unicode Braille characters (`U+2800..U+28FF`, 2x4 subpixels).
+#[must_use]
+pub fn render_braille(img: &RgbaImage, max_cols: Option<u32>) -> String {
+    // Standard Braille dot bit mapping for (dx, dy) in 2x4 cell.
+    const DOT_BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+
+    let target_cols = max_cols.unwrap_or(60).clamp(4, 240);
+    let target_w = target_cols * 2;
+    let src = if img.width() > target_w {
+        let ratio = target_w as f32 / img.width() as f32;
+        let target_h = ((img.height() as f32) * ratio).round().max(4.0) as u32;
+        image::imageops::resize(
+            img,
+            target_w,
+            target_h,
+            image::imageops::FilterType::Nearest,
+        )
+    } else {
+        img.clone()
+    };
+
+    // Adaptive luminance midpoint so both dark-on-light and light-on-dark palettes render clearly.
+    let mut min_l = 1.0f32;
+    let mut max_l = 0.0f32;
+    for px in src.pixels() {
+        if px[3] >= 128 {
+            let l = Rgb::new(px[0], px[1], px[2]).lightness();
+            min_l = min_l.min(l);
+            max_l = max_l.max(l);
+        }
+    }
+    let mid = f32::midpoint(min_l, max_l);
+
+    let w = src.width();
+    let h = src.height();
+    let mut out = String::new();
+
+    for cy in (0..h).step_by(4) {
+        for cx in (0..w).step_by(2) {
+            let mut mask = 0u8;
+            for dx in 0..2u32 {
+                for dy in 0..4u32 {
+                    let x = cx + dx;
+                    let y = cy + dy;
+                    if x < w && y < h {
+                        let px = *src.get_pixel(x, y);
+                        if px[3] >= 128 && Rgb::new(px[0], px[1], px[2]).lightness() > mid {
+                            mask |= DOT_BITS[dx as usize][dy as usize];
+                        }
+                    }
+                }
+            }
+            let ch = char::from_u32(0x2800 + u32::from(mask)).unwrap_or(' ');
+            out.push(ch);
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+/// Render an image as classic density-ramp ASCII text art.
+#[must_use]
+pub fn render_ascii(img: &RgbaImage, max_cols: Option<u32>) -> String {
+    const RAMP: &[u8] = b" .:-=+*#%@";
+    let target_w = max_cols.unwrap_or(80).clamp(8, 240);
+    // Account for ~2:1 terminal character cell aspect ratio.
+    let ratio = target_w as f32 / img.width().max(1) as f32;
+    let target_h = ((img.height() as f32) * ratio * 0.5).round().max(1.0) as u32;
+    let resized = image::imageops::resize(
+        img,
+        target_w,
+        target_h,
+        image::imageops::FilterType::Nearest,
+    );
+
+    let mut out = String::with_capacity((target_w as usize + 1) * target_h as usize);
+    for y in 0..resized.height() {
+        for x in 0..resized.width() {
+            let px = *resized.get_pixel(x, y);
+            if px[3] < 64 {
+                out.push(' ');
+            } else {
+                let l = Rgb::new(px[0], px[1], px[2]).lightness().clamp(0.0, 1.0);
+                let idx = ((l * (RAMP.len() - 1) as f32).round() as usize).min(RAMP.len() - 1);
+                out.push(char::from(RAMP[idx]));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Render an image as chunked Kitty graphics protocol escape sequences (PNG `f=100`, direct `t=d`).
+///
+/// Works natively in Kitty, Ghostty, `WezTerm`, Konsole, and other terminals supporting the Kitty
+/// graphics protocol. Set `opts.tmux_passthrough` to wrap chunks in tmux DCS passthrough.
+///
+/// # Errors
+/// Returns an error if lossless PNG encoding fails.
+pub fn render_kitty(img: &RgbaImage, opts: KittyOptions) -> Result<String> {
+    let png_bytes =
+        encode_fast_png_bytes(img).context("encoding PNG payload for Kitty graphics protocol")?;
+    Ok(encode_kitty_png(&png_bytes, opts))
+}
+
+/// Wrap pre-encoded PNG bytes into chunked Kitty graphics protocol APC escape sequences.
+#[must_use]
+pub fn encode_kitty_png(png_bytes: &[u8], opts: KittyOptions) -> String {
+    let encoded = base64_encode(png_bytes);
+    let total_len = encoded.len();
+    let chunk_count = total_len.div_ceil(KITTY_CHUNK_SIZE).max(1);
+
+    let mut out = String::with_capacity(total_len + chunk_count * 48);
+
+    for (idx, chunk) in encoded.as_bytes().chunks(KITTY_CHUNK_SIZE).enumerate() {
+        let is_first = idx == 0;
+        let is_last = idx + 1 == chunk_count;
+        let more = u8::from(!is_last);
+        let chunk_str = std::str::from_utf8(chunk).unwrap_or("");
+
+        if opts.tmux_passthrough {
+            out.push_str("\x1bPtmux;\x1b\x1b_G");
+        } else {
+            out.push_str("\x1b_G");
+        }
+
+        if is_first {
+            // a=T: transmit and display, f=100: PNG, t=d: direct payload, q=2: quiet (no acks).
+            out.push_str("a=T,f=100,t=d,q=2");
+            if let Some(id) = opts.image_id
+                && id > 0
+            {
+                let _ = write!(out, ",i={id},p=1");
+            }
+            if opts.no_cursor_move {
+                out.push_str(",C=1");
+            }
+            if let Some(cols) = opts.cols
+                && cols > 0
+            {
+                let _ = write!(out, ",c={cols}");
+            }
+            if let Some(rows) = opts.rows
+                && rows > 0
+            {
+                let _ = write!(out, ",r={rows}");
+            }
+            let _ = write!(out, ",m={more};{chunk_str}");
+        } else {
+            let _ = write!(out, "m={more};{chunk_str}");
+        }
+
+        if opts.tmux_passthrough {
+            out.push_str("\x1b\x1b\\\x1b\\");
+        } else {
+            out.push_str("\x1b\\");
+        }
+    }
+
+    if opts.trailing_newline {
+        out.push('\n');
+    }
+    out
+}
+
+/// Encode an `RgbaImage` directly into lossless PNG bytes (balanced compression for saved files).
+///
+/// # Errors
+/// Returns an error if PNG encoding fails.
+pub fn encode_png_bytes(img: &RgbaImage) -> Result<Vec<u8>> {
+    let mut png_bytes = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(img.clone())
+        .write_to(&mut png_bytes, ImageFormat::Png)
+        .context("encoding PNG bytes")?;
+    Ok(png_bytes.into_inner())
+}
+
+/// Ultra-fast lossless PNG encoding tailored for live interactive Kitty graphics previews.
+///
+/// Automatically uses 8-bit indexed PNG (4x fewer bytes to compress and ~3x smaller Kitty
+/// Base64 payload!) whenever the image uses <= 16 opaque palette colors, and falls back to
+/// fast `Compression::Fast` + `Filter::NoFilter` RGBA for continuous-tone / translucent frames.
+///
+/// # Errors
+/// Returns an error if PNG encoding fails.
+pub fn encode_fast_png_bytes(img: &RgbaImage) -> Result<Vec<u8>> {
+    let pixel_count = (img.width() as usize) * (img.height() as usize);
+    let (pixels, _) = img.as_raw().as_chunks::<4>();
+
+    // Fast probe: if <= 16 unique opaque colors (99% of dithered frames), encode indexed PNG.
+    let mut palette: Vec<[u8; 3]> = Vec::with_capacity(16);
+    let mut indices: Vec<u8> = Vec::with_capacity(pixel_count);
+    let mut can_index = true;
+    for &px in pixels {
+        if px[3] != 255 {
+            can_index = false;
+            break;
+        }
+        let rgb = [px[0], px[1], px[2]];
+        if let Some(pos) = palette.iter().position(|&c| c == rgb) {
+            indices.push(pos as u8);
+        } else if palette.len() < 16 {
+            indices.push(palette.len() as u8);
+            palette.push(rgb);
+        } else {
+            can_index = false;
+            break;
+        }
+    }
+
+    let mut out = Vec::with_capacity(if can_index {
+        pixel_count / 4 + 256
+    } else {
+        pixel_count / 2 + 256
+    });
+    {
+        let mut encoder = png::Encoder::new(&mut out, img.width(), img.height());
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        encoder.set_filter(png::Filter::NoFilter);
+        if can_index && !palette.is_empty() {
+            encoder.set_color(png::ColorType::Indexed);
+            let mut flat_pal = Vec::with_capacity(palette.len() * 3);
+            for rgb in &palette {
+                flat_pal.extend_from_slice(rgb);
+            }
+            encoder.set_palette(flat_pal);
+            let mut writer = encoder
+                .write_header()
+                .context("writing fast indexed PNG header")?;
+            writer
+                .write_image_data(&indices)
+                .context("writing fast indexed PNG pixel data")?;
+        } else {
+            encoder.set_color(png::ColorType::Rgba);
+            let mut writer = encoder.write_header().context("writing fast PNG header")?;
+            writer
+                .write_image_data(img.as_raw())
+                .context("writing fast PNG pixel data")?;
+        }
+    }
+    Ok(out)
+}
+
+/// Standard RFC 4648 Base64 encoder (zero extra dependencies).
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let (chunks, rem) = input.as_chunks::<3>();
+    for chunk in chunks {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+        out.push(char::from(TABLE[((n >> 18) & 0x3F) as usize]));
+        out.push(char::from(TABLE[((n >> 12) & 0x3F) as usize]));
+        out.push(char::from(TABLE[((n >> 6) & 0x3F) as usize]));
+        out.push(char::from(TABLE[(n & 0x3F) as usize]));
+    }
+    match rem.len() {
+        1 => {
+            let n = u32::from(rem[0]) << 16;
+            out.push(char::from(TABLE[((n >> 18) & 0x3F) as usize]));
+            out.push(char::from(TABLE[((n >> 12) & 0x3F) as usize]));
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let n = (u32::from(rem[0]) << 16) | (u32::from(rem[1]) << 8);
+            out.push(char::from(TABLE[((n >> 18) & 0x3F) as usize]));
+            out.push(char::from(TABLE[((n >> 12) & 0x3F) as usize]));
+            out.push(char::from(TABLE[((n >> 6) & 0x3F) as usize]));
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn kitty_graphics_chunks_and_headers_follow_spec() {
+        let img = RgbaImage::from_pixel(8, 8, Rgba([20, 40, 180, 255]));
+        let single = render_kitty(
+            &img,
+            KittyOptions {
+                cols: Some(40),
+                rows: None,
+                tmux_passthrough: false,
+                trailing_newline: true,
+                no_cursor_move: false,
+                image_id: None,
+            },
+        )
+        .unwrap();
+        assert!(single.starts_with("\x1b_Ga=T,f=100,t=d,q=2,c=40,m=0;"));
+        assert!(single.ends_with("\x1b\\\n"));
+
+        // Verify stable image_id framing for flicker-free animation replacement.
+        let atomic = encode_kitty_png(
+            b"hi",
+            KittyOptions {
+                image_id: Some(1),
+                no_cursor_move: true,
+                trailing_newline: false,
+                ..KittyOptions::default()
+            },
+        );
+        assert!(atomic.starts_with("\x1b_Ga=T,f=100,t=d,q=2,i=1,p=1,C=1,m=0;"));
+
+        // Verify multi-chunk framing (>4096 base64 chars).
+        let big_payload = vec![0xABu8; 4000];
+        let multi = encode_kitty_png(&big_payload, KittyOptions::default());
+        assert!(multi.starts_with("\x1b_Ga=T,f=100,t=d,q=2,m=1;"));
+        assert!(multi.contains("\x1b\\\x1b_Gm=0;"));
+        assert!(multi.ends_with("\x1b\\\n"));
+
+        // Verify tmux DCS passthrough doubles ESC bytes.
+        let tmux = encode_kitty_png(
+            b"hi",
+            KittyOptions {
+                cols: None,
+                rows: None,
+                tmux_passthrough: true,
+                trailing_newline: true,
+                no_cursor_move: false,
+                image_id: None,
+            },
+        );
+        assert!(tmux.starts_with("\x1bPtmux;\x1b\x1b_Ga=T,f=100,t=d,q=2,m=0;"));
+        assert!(tmux.ends_with("\x1b\x1b\\\x1b\\\n"));
+    }
+
+    #[test]
+    fn svg_export_merges_horizontal_runs() {
+        let mut img = RgbaImage::from_pixel(8, 2, Rgba([255, 255, 255, 255]));
+        for x in 2..6 {
+            img.put_pixel(x, 0, Rgba([0, 0, 0, 255]));
+        }
+        let svg = render_svg(&img, SvgShape::Rect, false);
+        assert!(
+            svg.contains("width=\"4\" height=\"1\""),
+            "expected RLE rect: {svg}"
+        );
+        assert!(svg.contains("fill=\"#000000\""));
+    }
+
+    #[test]
+    fn fast_png_indexed_and_rgba_round_trip_identically() {
+        let mut dithered = RgbaImage::from_pixel(16, 12, Rgba([244, 240, 228, 255]));
+        for y in 0..12 {
+            for x in 0..16 {
+                if (x + y) % 2 == 0 {
+                    dithered.put_pixel(x, y, Rgba([26, 43, 140, 255]));
+                }
+            }
+        }
+        let indexed_bytes = encode_fast_png_bytes(&dithered).unwrap();
+        let decoded = image::load_from_memory(&indexed_bytes).unwrap().to_rgba8();
+        assert_eq!(decoded, dithered);
+
+        let mut translucent = dithered;
+        translucent.put_pixel(0, 0, Rgba([10, 20, 30, 128]));
+        let rgba_bytes = encode_fast_png_bytes(&translucent).unwrap();
+        let decoded_rgba = image::load_from_memory(&rgba_bytes).unwrap().to_rgba8();
+        assert_eq!(decoded_rgba, translucent);
+    }
+
+    #[test]
+    fn braille_and_ascii_render_non_empty() {
+        let mut img = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255]));
+        for y in 0..8 {
+            for x in 0..16 {
+                img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+            }
+        }
+        let braille = render_braille(&img, Some(8));
+        assert!(braille.contains('\u{28ff}'));
+        let ascii = render_ascii(&img, Some(16));
+        assert!(ascii.contains('@'));
+    }
+}

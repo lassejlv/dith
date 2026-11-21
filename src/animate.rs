@@ -1,0 +1,1091 @@
+//! Highly customizable animated dithering engine:
+//! seamless procedural loops, GIF/sequence decoding, easing curves, parameter sweeps,
+//! classic palette cycling, Risograph film-boil cadence, exact-palette GIF, APNG, and spritesheets.
+
+use std::collections::HashMap;
+use std::f32::consts::PI;
+use std::fs::{self, File};
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use clap::ValueEnum;
+use image::codecs::gif::GifDecoder;
+use image::codecs::png::PngDecoder;
+use image::codecs::webp::WebPDecoder;
+use image::{AnimationDecoder, Rgba, RgbaImage};
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::color::Rgb;
+use crate::dither::dither_image;
+use crate::generate::{GenerateOptions, generate_pattern};
+use crate::output::{ColorUsage, color_histogram, encode_png_bytes, write_output_file};
+use crate::palette::{Palette, extract_adaptive_palette, extract_adaptive_palette_from_frames};
+use crate::preprocess::{finalize_image, prepare_image};
+use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError};
+
+/// Parse error for `START..END` sweep ranges or `DX,DY` drift vectors.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid range/vector '{input}': {expected}")]
+pub struct ParseAnimArgError {
+    pub input: String,
+    pub expected: &'static str,
+}
+
+/// Inclusive floating-point parameter sweep `START..END` (e.g. `-0.4..0.2`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FloatRange {
+    pub start: f32,
+    pub end: f32,
+}
+
+impl FloatRange {
+    #[must_use]
+    pub fn sample(self, t: f32) -> f32 {
+        self.start + (self.end - self.start) * t.clamp(0.0, 1.0)
+    }
+}
+
+impl FromStr for FloatRange {
+    type Err = ParseAnimArgError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        let (a, b) = trimmed
+            .split_once("..")
+            .or_else(|| trimmed.split_once(':'))
+            .ok_or_else(|| ParseAnimArgError {
+                input: trimmed.to_string(),
+                expected: "expected START..END (e.g. -0.35..0.35 or 0.0..1.2)",
+            })?;
+        let start = a.trim().parse::<f32>().map_err(|_| ParseAnimArgError {
+            input: trimmed.to_string(),
+            expected: "expected valid float before '..'",
+        })?;
+        let end = b.trim().parse::<f32>().map_err(|_| ParseAnimArgError {
+            input: trimmed.to_string(),
+            expected: "expected valid float after '..'",
+        })?;
+        Ok(Self { start, end })
+    }
+}
+
+/// Inclusive integer parameter sweep `START..END` (e.g. `12..1` for de-pixelation reveals).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct U32Range {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl U32Range {
+    #[must_use]
+    pub fn sample(self, t: f32) -> u32 {
+        let t = t.clamp(0.0, 1.0);
+        let v = self.start as f32 + (self.end as f32 - self.start as f32) * t;
+        v.round().max(1.0) as u32
+    }
+}
+
+impl FromStr for U32Range {
+    type Err = ParseAnimArgError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        let (a, b) = trimmed
+            .split_once("..")
+            .or_else(|| trimmed.split_once(':'))
+            .ok_or_else(|| ParseAnimArgError {
+                input: trimmed.to_string(),
+                expected: "expected START..END (e.g. 12..1 or 1..8)",
+            })?;
+        let start = a.trim().parse::<u32>().map_err(|_| ParseAnimArgError {
+            input: trimmed.to_string(),
+            expected: "expected positive integer before '..'",
+        })?;
+        let end = b.trim().parse::<u32>().map_err(|_| ParseAnimArgError {
+            input: trimmed.to_string(),
+            expected: "expected positive integer after '..'",
+        })?;
+        Ok(Self { start, end })
+    }
+}
+
+/// Per-frame ordered-screen drift velocity `DX,DY` in screen cells (e.g. `1,0` or `0,-1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScreenDrift {
+    pub dx: i32,
+    pub dy: i32,
+}
+
+impl FromStr for ScreenDrift {
+    type Err = ParseAnimArgError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        let (a, b) = trimmed.split_once(',').ok_or_else(|| ParseAnimArgError {
+            input: trimmed.to_string(),
+            expected: "expected DX,DY integers (e.g. 1,0 or 2,-1)",
+        })?;
+        let dx = a.trim().parse::<i32>().map_err(|_| ParseAnimArgError {
+            input: trimmed.to_string(),
+            expected: "expected integer DX before ','",
+        })?;
+        let dy = b.trim().parse::<i32>().map_err(|_| ParseAnimArgError {
+            input: trimmed.to_string(),
+            expected: "expected integer DY after ','",
+        })?;
+        Ok(Self { dx, dy })
+    }
+}
+
+/// Easing curve applied to procedural phase and parameter sweeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Easing {
+    /// Constant steady velocity across the loop.
+    #[default]
+    Linear,
+    /// Smooth sinusoidal acceleration and deceleration.
+    EaseInOut,
+    /// Accelerating quadratic ease-in.
+    EaseIn,
+    /// Decelerating quadratic ease-out (ideal for dissolves & focus-in reveals).
+    EaseOut,
+    /// Classic cubic Hermite S-curve.
+    Smoothstep,
+    /// Playful elastic bounce landing.
+    Bounce,
+    /// Quantized stop-motion steps (controlled by `--easing-steps`).
+    Steps,
+}
+
+impl Easing {
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::EaseInOut => "ease-in-out",
+            Self::EaseIn => "ease-in",
+            Self::EaseOut => "ease-out",
+            Self::Smoothstep => "smoothstep",
+            Self::Bounce => "bounce",
+            Self::Steps => "steps",
+        }
+    }
+
+    /// Evaluate the easing curve for `t` in `[0.0, 1.0]`.
+    #[must_use]
+    pub fn apply(self, t: f32, steps: u32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => t,
+            Self::EaseInOut => 0.5 - 0.5 * (t * PI).cos(),
+            Self::EaseIn => t * t,
+            Self::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+            Self::Smoothstep => t * t * (3.0 - 2.0 * t),
+            Self::Bounce => ease_out_bounce(t),
+            Self::Steps => {
+                let s = steps.max(2) as f32;
+                ((t * s).floor() / (s - 1.0)).clamp(0.0, 1.0)
+            }
+        }
+    }
+}
+
+fn ease_out_bounce(t: f32) -> f32 {
+    const N1: f32 = 7.5625;
+    const D1: f32 = 2.75;
+    if t < 1.0 / D1 {
+        N1 * t * t
+    } else if t < 2.0 / D1 {
+        let u = t - 1.5 / D1;
+        N1 * u * u + 0.75
+    } else if t < 2.5 / D1 {
+        let u = t - 2.25 / D1;
+        N1 * u * u + 0.9375
+    } else {
+        let u = t - 2.625 / D1;
+        N1 * u * u + 0.984_375
+    }
+}
+
+/// How parameter sweeps (`--sweep-*`) progress over the animation timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SweepMode {
+    /// Progress cleanly from `start` on frame 0 to `end` on the final frame.
+    #[default]
+    Linear,
+    /// Smoothly breathe `start -> end -> start` over a seamless loop (`sin^2(pi * t)`).
+    Pulse,
+}
+
+impl SweepMode {
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Pulse => "pulse",
+        }
+    }
+
+    #[must_use]
+    pub fn shape(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => t,
+            Self::Pulse => {
+                let s = (t * PI).sin();
+                s * s
+            }
+        }
+    }
+}
+
+/// Controls how the dither pattern evolves across animation frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TemporalMode {
+    /// Fixed dither screen & seed across frames (temporally rock-solid, zero flicker on static regions).
+    #[default]
+    Locked,
+    /// Hand-drawn Risograph / 16mm film boil using golden-ratio shifted screen offsets & subtle jitter.
+    Boil,
+    /// Energetic animated newsprint/photocopy stipple grain every frame.
+    Grain,
+}
+
+impl TemporalMode {
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::Boil => "boil",
+            Self::Grain => "grain",
+        }
+    }
+
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Locked => {
+                "Fixed screen across frames (silky smooth, zero flicker — Obra Dinn / Playdate style)"
+            }
+            Self::Boil => {
+                "Subtle hand-drawn Risograph / 16mm film boil via frame-shifted blue noise & micro-jitter"
+            }
+            Self::Grain => {
+                "Lively animated stipple grain every frame (photocopy / punk zine energy)"
+            }
+        }
+    }
+}
+
+/// Output container format for animated dithers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnimFormat {
+    /// Lossless exact-palette looping GIF (direct global color table, tiny file size).
+    #[default]
+    Gif,
+    /// Lossless full-color Animated PNG (32-bit RGBA + alpha, crisp web playback).
+    Apng,
+    /// Single packed PNG sprite sheet (for CSS `steps()` or game engines).
+    Spritesheet,
+    /// Directory of numbered lossless PNG frames (`frame_0001.png`, ...).
+    Frames,
+}
+
+impl AnimFormat {
+    /// Infer animation container from output path extension.
+    #[must_use]
+    pub fn infer_from_path(path: &Path) -> Self {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("apng") => Self::Apng,
+            Some("png") => Self::Spritesheet,
+            _ => Self::Gif,
+        }
+    }
+
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Gif => "gif",
+            Self::Apng => "apng",
+            Self::Spritesheet => "spritesheet",
+            Self::Frames => "frames",
+        }
+    }
+}
+
+/// Full animation customization parameters applied during per-frame dithering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnimDitherOptions {
+    pub temporal: TemporalMode,
+    /// Boil cadence: update boil pattern every N frames (`1` = every frame, `2` = on twos, `3` = on threes).
+    pub boil_rate: u32,
+    /// Optional explicit boil/grain jitter intensity (`0.0..=0.5`).
+    pub boil_amount: Option<f32>,
+    /// Optional per-frame screen cell drift `(dx, dy)` for scrolling halftone/Bayer/scanlines.
+    pub screen_drift: Option<ScreenDrift>,
+    /// Easing curve for parameter sweeps.
+    pub easing: Easing,
+    /// Step count when `easing == Easing::Steps`.
+    pub easing_steps: u32,
+    /// Sweep progression shape (`linear` vs seamless `pulse`).
+    pub sweep_mode: SweepMode,
+    /// Animate dither threshold bias across frames (ink-wash dissolve!).
+    pub sweep_bias: Option<FloatRange>,
+    /// Animate contrast across frames.
+    pub sweep_contrast: Option<FloatRange>,
+    /// Animate brightness across frames (dithered fade-in/fade-out!).
+    pub sweep_brightness: Option<FloatRange>,
+    /// Animate gamma across frames.
+    pub sweep_gamma: Option<FloatRange>,
+    /// Animate dither strength across frames (posterize <-> full stipple!).
+    pub sweep_strength: Option<FloatRange>,
+    /// Animate chunky `pixel_size` across frames (mosaic focus-in reveal!).
+    pub sweep_pixel_size: Option<U32Range>,
+    /// Classic 90s VGA/Amiga palette color-cycling across frames.
+    pub cycle_palette: bool,
+    /// Extract an adaptive palette per frame instead of locking one shared global palette.
+    pub per_frame_palette: bool,
+}
+
+impl Default for AnimDitherOptions {
+    fn default() -> Self {
+        Self {
+            temporal: TemporalMode::Locked,
+            boil_rate: 1,
+            boil_amount: None,
+            screen_drift: None,
+            easing: Easing::Linear,
+            easing_steps: 6,
+            sweep_mode: SweepMode::Linear,
+            sweep_bias: None,
+            sweep_contrast: None,
+            sweep_brightness: None,
+            sweep_gamma: None,
+            sweep_strength: None,
+            sweep_pixel_size: None,
+            cycle_palette: false,
+            per_frame_palette: false,
+        }
+    }
+}
+
+/// Parameters controlling procedural phase progression across frames.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProceduralMotion {
+    pub frame_count: usize,
+    pub fps: u32,
+    pub cycles: f32,
+    pub phase_offset: f32,
+    pub easing: Easing,
+    pub easing_steps: u32,
+    pub reverse: bool,
+}
+
+/// A single RGBA animation frame paired with its display delay in milliseconds.
+#[derive(Debug, Clone)]
+pub struct AnimFrame {
+    pub image: RgbaImage,
+    pub delay_ms: u32,
+}
+
+/// Result of dithering an entire animation sequence.
+#[derive(Debug, Clone)]
+pub struct AnimatedOutput {
+    pub frames: Vec<AnimFrame>,
+    pub palette: Palette,
+    pub source_dimensions: [u32; 2],
+    pub output_dimensions: [u32; 2],
+    pub histogram: Vec<ColorUsage>,
+    pub elapsed_ms: u128,
+}
+
+/// Generate seamlessly looping procedural frames in parallel with easing, cycles, and phase offset.
+#[must_use]
+pub fn generate_procedural_frames(
+    base_opts: &GenerateOptions,
+    motion: ProceduralMotion,
+) -> Vec<AnimFrame> {
+    let count = motion.frame_count.max(1);
+    let delay_ms = (1000 / motion.fps.clamp(1, 60)).max(16);
+
+    (0..count)
+        .into_par_iter()
+        .map(|i| {
+            let linear_t = i as f32 / count as f32;
+            let eased = motion.easing.apply(linear_t, motion.easing_steps);
+            let directed = if motion.reverse { 1.0 - eased } else { eased };
+            let mut opts = base_opts.clone();
+            opts.phase = (motion.phase_offset + directed * motion.cycles).rem_euclid(1.0);
+            AnimFrame {
+                image: generate_pattern(&opts),
+                delay_ms,
+            }
+        })
+        .collect()
+}
+
+/// Decode all composited RGBA frames and per-frame delays from an animated GIF file.
+///
+/// # Errors
+/// Returns an error if the file cannot be opened or decoded as a GIF.
+pub fn decode_gif_frames(
+    path: &Path,
+    override_fps: Option<u32>,
+    max_frames: Option<usize>,
+) -> Result<Vec<AnimFrame>> {
+    let file =
+        File::open(path).with_context(|| format!("opening animated GIF '{}'", path.display()))?;
+    let decoder = GifDecoder::new(BufReader::new(file))
+        .with_context(|| format!("decoding GIF header of '{}'", path.display()))?;
+    let raw_frames = decoder
+        .into_frames()
+        .collect_frames()
+        .with_context(|| format!("decoding GIF frames of '{}'", path.display()))?;
+
+    Ok(convert_image_frames(raw_frames, override_fps, max_frames))
+}
+
+/// Auto-detect and decode multi-frame animations from GIF, APNG (`.apng` / animated `.png`), or
+/// animated WebP files. Returns `Ok(None)` if the file is a single static frame or non-animated format.
+///
+/// # Errors
+/// Returns an error if an explicitly animated container cannot be opened or decoded.
+pub fn decode_animated_frames(
+    path: &Path,
+    override_fps: Option<u32>,
+    max_frames: Option<usize>,
+) -> Result<Option<Vec<AnimFrame>>> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+
+    match ext.as_deref() {
+        Some("gif") => {
+            let frames = decode_gif_frames(path, override_fps, max_frames)?;
+            Ok((frames.len() > 1).then_some(frames))
+        }
+        Some("apng" | "png") => {
+            let file =
+                File::open(path).with_context(|| format!("opening PNG '{}'", path.display()))?;
+            let decoder = PngDecoder::new(BufReader::new(file))
+                .with_context(|| format!("decoding PNG header of '{}'", path.display()))?;
+            if !decoder.is_apng().unwrap_or(false) {
+                return Ok(None);
+            }
+            let apng = decoder
+                .apng()
+                .with_context(|| format!("opening APNG stream of '{}'", path.display()))?;
+            let raw_frames = apng
+                .into_frames()
+                .collect_frames()
+                .with_context(|| format!("decoding APNG frames of '{}'", path.display()))?;
+            let frames = convert_image_frames(raw_frames, override_fps, max_frames);
+            Ok((frames.len() > 1).then_some(frames))
+        }
+        Some("webp") => {
+            let file =
+                File::open(path).with_context(|| format!("opening WebP '{}'", path.display()))?;
+            let decoder = WebPDecoder::new(BufReader::new(file))
+                .with_context(|| format!("decoding WebP header of '{}'", path.display()))?;
+            if !decoder.has_animation() {
+                return Ok(None);
+            }
+            let raw_frames = decoder
+                .into_frames()
+                .collect_frames()
+                .with_context(|| format!("decoding WebP frames of '{}'", path.display()))?;
+            let frames = convert_image_frames(raw_frames, override_fps, max_frames);
+            Ok((frames.len() > 1).then_some(frames))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn convert_image_frames(
+    raw_frames: Vec<image::Frame>,
+    override_fps: Option<u32>,
+    max_frames: Option<usize>,
+) -> Vec<AnimFrame> {
+    let limit = max_frames.unwrap_or(usize::MAX).max(1);
+    let override_delay = override_fps.map(|f| (1000 / f.clamp(1, 60)).max(16));
+
+    raw_frames
+        .into_iter()
+        .take(limit)
+        .map(|frame| {
+            let (numer, denom) = frame.delay().numer_denom_ms();
+            let raw_ms = numer.checked_div(denom).unwrap_or(100);
+            // Browsers treat 0ms frames as ~100ms; clamp to sensible minimum 20ms.
+            let delay_ms = override_delay.unwrap_or(if raw_ms < 20 { 100 } else { raw_ms });
+            AnimFrame {
+                image: frame.into_buffer(),
+                delay_ms,
+            }
+        })
+        .collect()
+}
+
+/// Append reversed interior frames so an animation loops back and forth seamlessly.
+pub fn apply_ping_pong(frames: &mut Vec<AnimFrame>) {
+    if frames.len() <= 2 {
+        return;
+    }
+    let tail: Vec<AnimFrame> = frames[1..frames.len() - 1].iter().rev().cloned().collect();
+    frames.extend(tail);
+}
+
+/// Duplicate the first and/or last frame to create crisp hold/dwell pauses at loop boundaries.
+pub fn apply_holds(frames: &mut Vec<AnimFrame>, hold_start: usize, hold_end: usize) {
+    if frames.is_empty() {
+        return;
+    }
+    if hold_start > 0 {
+        let first = frames[0].clone();
+        let mut prefix = vec![first; hold_start];
+        prefix.append(frames);
+        *frames = prefix;
+    }
+    if hold_end > 0 {
+        let last = frames[frames.len() - 1].clone();
+        frames.extend(std::iter::repeat_n(last, hold_end));
+    }
+}
+
+/// Preprocess, resolve palette, and dither all animation frames in parallel with full per-frame
+/// sweep, boil cadence, screen drift, and palette cycling controls.
+///
+/// # Errors
+/// Returns a [`RecipeError`] if validation or palette resolution fails.
+pub fn dither_animation_frames(
+    raw_frames: &[AnimFrame],
+    recipe: &DitherRecipe,
+    anim_opts: &AnimDitherOptions,
+) -> Result<AnimatedOutput, RecipeError> {
+    let started = Instant::now();
+    recipe.validate()?;
+    if raw_frames.is_empty() {
+        return Err(RecipeError::Validation {
+            field: "frames",
+            reason: "animation contains zero frames".to_string(),
+        });
+    }
+    if anim_opts.boil_rate == 0 {
+        return Err(RecipeError::Validation {
+            field: "boil-rate",
+            reason: "must be >= 1".to_string(),
+        });
+    }
+    if let Some(amt) = anim_opts.boil_amount
+        && !(0.0..=0.5).contains(&amt)
+    {
+        return Err(RecipeError::Validation {
+            field: "boil-amount",
+            reason: format!("must be in 0.0..=0.5 (got {amt})"),
+        });
+    }
+
+    let total = raw_frames.len();
+    let source_dimensions = [raw_frames[0].image.width(), raw_frames[0].image.height()];
+
+    // Step 1: build per-frame preprocess options (applying any tonal/pixel-size sweeps) and prepare in parallel.
+    let prepared: Vec<_> = raw_frames
+        .par_iter()
+        .enumerate()
+        .map(|(frame_idx, f)| {
+            let sweep_t = frame_sweep_t(frame_idx, total, anim_opts);
+            let mut prep_opts = recipe.preprocess.clone();
+            if let Some(r) = anim_opts.sweep_contrast {
+                prep_opts.contrast = r.sample(sweep_t).clamp(-1.0, 1.0);
+            }
+            if let Some(r) = anim_opts.sweep_brightness {
+                prep_opts.brightness = r.sample(sweep_t).clamp(-1.0, 1.0);
+            }
+            if let Some(r) = anim_opts.sweep_gamma {
+                prep_opts.gamma = r.sample(sweep_t).clamp(0.1, 5.0);
+            }
+            if let Some(r) = anim_opts.sweep_pixel_size {
+                prep_opts.pixel_size = r.sample(sweep_t).clamp(1, 64);
+            }
+            (prepare_image(&f.image, &prep_opts), prep_opts)
+        })
+        .collect();
+
+    // Step 2: resolve shared global palette (unless --per-frame-palette is explicitly requested).
+    let shared_palette = match &recipe.palette {
+        PaletteSpec::Adaptive(n) if !anim_opts.per_frame_palette => {
+            let working_imgs: Vec<RgbaImage> =
+                prepared.iter().map(|(p, _)| p.working.clone()).collect();
+            extract_adaptive_palette_from_frames(&working_imgs, *n, recipe.dither.seed)?
+        }
+        _ => recipe.resolve_palette(&prepared[0].0.working)?,
+    };
+
+    let boil_rate = anim_opts.boil_rate.max(1);
+
+    // Step 3: dither and finalize every frame in parallel.
+    let dithered_frames: Result<Vec<AnimFrame>, RecipeError> = prepared
+        .par_iter()
+        .zip(raw_frames.par_iter())
+        .enumerate()
+        .map(|(frame_idx, ((prep, prep_opts), raw))| {
+            let sweep_t = frame_sweep_t(frame_idx, total, anim_opts);
+            let mut opts = recipe.dither.clone();
+
+            // Apply dither parameter sweeps.
+            if let Some(r) = anim_opts.sweep_bias {
+                opts.bias = r.sample(sweep_t).clamp(-0.5, 0.5);
+            }
+            if let Some(r) = anim_opts.sweep_strength {
+                opts.strength = r.sample(sweep_t).clamp(0.0, 1.5);
+            }
+
+            // Apply temporal boil cadence (e.g. boil_rate=2 animates boil "on twos").
+            let boil_tick = (frame_idx as u32) / boil_rate;
+            let boil_tick_u64 = u64::from(boil_tick);
+            match anim_opts.temporal {
+                TemporalMode::Locked => {}
+                TemporalMode::Boil => {
+                    opts.pattern_offset = [boil_tick.wrapping_mul(19), boil_tick.wrapping_mul(31)];
+                    opts.seed = opts
+                        .seed
+                        .wrapping_add(boil_tick_u64.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                    opts.noise = anim_opts
+                        .boil_amount
+                        .unwrap_or_else(|| opts.noise.max(0.045));
+                }
+                TemporalMode::Grain => {
+                    opts.pattern_offset = [boil_tick.wrapping_mul(29), boil_tick.wrapping_mul(47)];
+                    opts.seed = opts
+                        .seed
+                        .wrapping_add(boil_tick_u64.wrapping_mul(0xBF58_476D_1CE4_E5B9));
+                    opts.noise = anim_opts
+                        .boil_amount
+                        .unwrap_or_else(|| opts.noise.max(0.11));
+                }
+            }
+
+            // Apply explicit screen drift velocity (e.g. scrolling scanlines or drifting halftones).
+            if let Some(drift) = anim_opts.screen_drift {
+                let f = frame_idx as i32;
+                let dx =
+                    (opts.pattern_offset[0] as i32 + f.saturating_mul(drift.dx)).rem_euclid(1024);
+                let dy =
+                    (opts.pattern_offset[1] as i32 + f.saturating_mul(drift.dy)).rem_euclid(1024);
+                opts.pattern_offset = [dx as u32, dy as u32];
+            }
+
+            // Per-frame adaptive palette if explicitly requested.
+            let frame_palette = if anim_opts.per_frame_palette
+                && let PaletteSpec::Adaptive(n) = recipe.palette
+            {
+                extract_adaptive_palette(&prep.working, n, opts.seed)?
+            } else {
+                shared_palette.clone()
+            };
+
+            let mut dithered = dither_image(&prep.working, &frame_palette, &opts);
+
+            // Classic Amiga/VGA palette color cycling: rotate palette indices smoothly per frame!
+            if anim_opts.cycle_palette && frame_palette.len() >= 2 {
+                apply_palette_cycle(&mut dithered, &frame_palette, frame_idx, total);
+            }
+
+            let final_img = finalize_image(dithered, prep, prep_opts);
+            Ok(AnimFrame {
+                image: final_img,
+                delay_ms: raw.delay_ms,
+            })
+        })
+        .collect();
+    let dithered_frames = dithered_frames?;
+
+    let output_dimensions = [
+        dithered_frames[0].image.width(),
+        dithered_frames[0].image.height(),
+    ];
+    let histogram = color_histogram(&dithered_frames[0].image);
+
+    Ok(AnimatedOutput {
+        frames: dithered_frames,
+        palette: shared_palette,
+        source_dimensions,
+        output_dimensions,
+        histogram,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+fn frame_sweep_t(frame_idx: usize, total: usize, opts: &AnimDitherOptions) -> f32 {
+    let raw = if total <= 1 {
+        0.0
+    } else {
+        frame_idx as f32 / (total - 1) as f32
+    };
+    let shaped = opts.sweep_mode.shape(raw);
+    opts.easing.apply(shaped, opts.easing_steps)
+}
+
+fn apply_palette_cycle(img: &mut RgbaImage, palette: &Palette, frame_idx: usize, total: usize) {
+    let colors = palette.colors();
+    let n = colors.len();
+    let shift = ((frame_idx * n) / total.max(1)) % n;
+    if shift == 0 {
+        return;
+    }
+    let mut lut: HashMap<[u8; 3], Rgb> = HashMap::with_capacity(n);
+    for (i, &c) in colors.iter().enumerate() {
+        lut.insert(c.to_array(), colors[(i + shift) % n]);
+    }
+    for px in img.pixels_mut() {
+        if px[3] > 0
+            && let Some(&mapped) = lut.get(&[px[0], px[1], px[2]])
+        {
+            px[0] = mapped.r;
+            px[1] = mapped.g;
+            px[2] = mapped.b;
+        }
+    }
+}
+
+/// Encode dithered animation frames as a crisp, lossless exact-palette GIF (`loops == 0` -> infinite).
+///
+/// When the palette has `<= 255` entries, writes the exact palette directly as the GIF Global Color
+/// Table (zero `NeuQuant` color drift, exact hex preservation, and ~10x faster encoding).
+///
+/// # Errors
+/// Returns an error if frames are empty, exceed 65535px, or GIF encoding fails.
+pub fn encode_gif(
+    frames: &[AnimFrame],
+    palette: &Palette,
+    loops: u16,
+    per_frame_palette: bool,
+) -> Result<Vec<u8>> {
+    let first = frames
+        .first()
+        .context("cannot encode animated GIF from empty frame list")?;
+    let w = u16::try_from(first.image.width()).context("GIF width exceeds 65535 pixels")?;
+    let h = u16::try_from(first.image.height()).context("GIF height exceeds 65535 pixels")?;
+
+    let has_transparency = frames
+        .iter()
+        .any(|f| f.image.pixels().any(|px| px[3] < 128));
+    let can_use_exact_palette =
+        !per_frame_palette && palette.len() <= if has_transparency { 255 } else { 256 };
+
+    let mut out = Vec::new();
+    {
+        let mut color_table: Vec<u8> = Vec::new();
+        let mut color_to_idx: HashMap<[u8; 3], u8> = HashMap::new();
+        let transparent_idx: Option<u8> = if can_use_exact_palette {
+            for (i, c) in palette.colors().iter().enumerate() {
+                color_table.extend_from_slice(&[c.r, c.g, c.b]);
+                color_to_idx.insert([c.r, c.g, c.b], i as u8);
+            }
+            if has_transparency {
+                let tidx = palette.len() as u8;
+                color_table.extend_from_slice(&[0, 0, 0]);
+                Some(tidx)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut encoder =
+            gif::Encoder::new(&mut out, w, h, &color_table).context("initializing GIF encoder")?;
+        let repeat = if loops == 0 {
+            gif::Repeat::Infinite
+        } else {
+            gif::Repeat::Finite(loops)
+        };
+        encoder
+            .set_repeat(repeat)
+            .context("setting GIF loop count")?;
+
+        for frame in frames {
+            let delay_cs = ((frame.delay_ms + 5) / 10).clamp(2, u32::from(u16::MAX)) as u16;
+            if can_use_exact_palette {
+                let mut indices = Vec::with_capacity((w as usize) * (h as usize));
+                for px in frame.image.pixels() {
+                    if let Some(tidx) = transparent_idx
+                        && px[3] < 128
+                    {
+                        indices.push(tidx);
+                        continue;
+                    }
+                    let rgb = [px[0], px[1], px[2]];
+                    let idx = color_to_idx.get(&rgb).copied().unwrap_or_else(|| {
+                        palette
+                            .nearest_index_from_srgb(Rgb::new(rgb[0], rgb[1], rgb[2]).to_srgb_f32())
+                            as u8
+                    });
+                    indices.push(idx);
+                }
+                let mut gf = gif::Frame::from_indexed_pixels(w, h, indices, transparent_idx);
+                gf.delay = delay_cs;
+                gf.dispose = if has_transparency {
+                    gif::DisposalMethod::Background
+                } else {
+                    gif::DisposalMethod::Keep
+                };
+                encoder
+                    .write_frame(&gf)
+                    .context("writing exact-palette GIF frame")?;
+            } else {
+                let mut rgba = frame.image.as_raw().clone();
+                let mut gf = gif::Frame::from_rgba_speed(w, h, &mut rgba, 10);
+                gf.delay = delay_cs;
+                gf.dispose = gif::DisposalMethod::Background;
+                encoder.write_frame(&gf).context("writing GIF frame")?;
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Encode dithered animation frames as a lossless 32-bit RGBA Animated PNG (`loops == 0` -> infinite).
+///
+/// # Errors
+/// Returns an error if frames are empty or PNG encoding fails.
+pub fn encode_apng(frames: &[AnimFrame], loops: u32) -> Result<Vec<u8>> {
+    let first = frames
+        .first()
+        .context("cannot encode APNG from empty frame list")?;
+    let w = first.image.width();
+    let h = first.image.height();
+    let num_frames = u32::try_from(frames.len()).context("frame count exceeds u32")?;
+
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .set_animated(num_frames, loops)
+            .context("configuring APNG animation header")?;
+        encoder
+            .set_dispose_op(png::DisposeOp::Background)
+            .context("setting APNG dispose op")?;
+        encoder
+            .set_blend_op(png::BlendOp::Source)
+            .context("setting APNG blend op")?;
+
+        let mut writer = encoder.write_header().context("writing APNG header")?;
+        for frame in frames {
+            let delay_ms =
+                u16::try_from(frame.delay_ms.clamp(10, u32::from(u16::MAX))).unwrap_or(u16::MAX);
+            writer
+                .set_frame_delay(delay_ms, 1000)
+                .context("setting APNG frame delay")?;
+            writer
+                .write_image_data(frame.image.as_raw())
+                .context("writing APNG frame pixels")?;
+        }
+        writer.finish().context("finalizing APNG stream")?;
+    }
+    Ok(out)
+}
+
+/// Pack animation frames into a crisp PNG sprite sheet `(image, columns, rows)`.
+#[must_use]
+pub fn compose_spritesheet(frames: &[AnimFrame], columns: Option<u32>) -> (RgbaImage, u32, u32) {
+    if frames.is_empty() {
+        return (RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 0])), 1, 1);
+    }
+    let count = frames.len() as u32;
+    let cols = columns.unwrap_or(count).clamp(1, count);
+    let rows = count.div_ceil(cols);
+    let fw = frames[0].image.width();
+    let fh = frames[0].image.height();
+
+    let mut sheet = RgbaImage::from_pixel(fw * cols, fh * rows, Rgba([0, 0, 0, 0]));
+    for (idx, frame) in frames.iter().enumerate() {
+        let col = (idx as u32) % cols;
+        let row = (idx as u32) / cols;
+        let ox = col * fw;
+        let oy = row * fh;
+        for (x, y, &px) in frame.image.enumerate_pixels() {
+            if ox + x < sheet.width() && oy + y < sheet.height() {
+                sheet.put_pixel(ox + x, oy + y, px);
+            }
+        }
+    }
+    (sheet, cols, rows)
+}
+
+/// Write numbered PNG frames (`frame_0001.png`, ...) into `dir` and return their written paths.
+///
+/// # Errors
+/// Returns an error if directory creation, PNG encoding, or file writing fails.
+pub fn write_frames_directory(frames: &[AnimFrame], dir: &Path) -> Result<Vec<PathBuf>> {
+    fs::create_dir_all(dir)
+        .with_context(|| format!("creating frames directory '{}'", dir.display()))?;
+
+    let encoded: Result<Vec<(PathBuf, Vec<u8>)>> = frames
+        .par_iter()
+        .enumerate()
+        .map(|(i, frame)| {
+            let path = dir.join(format!("frame_{:04}.png", i + 1));
+            let bytes = encode_png_bytes(&frame.image)?;
+            Ok((path, bytes))
+        })
+        .collect();
+    let encoded = encoded?;
+
+    let mut paths = Vec::with_capacity(encoded.len());
+    for (path, bytes) in encoded {
+        write_output_file(&path, &bytes)?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generate::Pattern;
+
+    #[test]
+    fn ranges_and_easings_parse_and_evaluate_cleanly() {
+        let fr: FloatRange = "-0.4..0.2".parse().unwrap();
+        assert!((fr.sample(0.0) - (-0.4)).abs() < 1e-5);
+        assert!((fr.sample(1.0) - 0.2).abs() < 1e-5);
+
+        let ur: U32Range = "12..2".parse().unwrap();
+        assert_eq!(ur.sample(0.0), 12);
+        assert_eq!(ur.sample(1.0), 2);
+
+        let drift: ScreenDrift = "2,-1".parse().unwrap();
+        assert_eq!((drift.dx, drift.dy), (2, -1));
+
+        for easing in [
+            Easing::Linear,
+            Easing::EaseInOut,
+            Easing::EaseIn,
+            Easing::EaseOut,
+            Easing::Smoothstep,
+            Easing::Bounce,
+            Easing::Steps,
+        ] {
+            assert!(easing.apply(0.0, 5) <= 1e-4, "easing {easing:?} at 0");
+            assert!(
+                (easing.apply(1.0, 5) - 1.0).abs() <= 1e-4,
+                "easing {easing:?} at 1"
+            );
+        }
+    }
+
+    #[test]
+    fn procedural_animation_with_sweeps_and_cycling_encodes_gif_and_apng() {
+        let gen_opts = GenerateOptions {
+            pattern: Pattern::Sphere,
+            width: 48,
+            height: 36,
+            ..Default::default()
+        };
+        let raw = generate_procedural_frames(
+            &gen_opts,
+            ProceduralMotion {
+                frame_count: 6,
+                fps: 12,
+                cycles: 1.0,
+                phase_offset: 0.0,
+                easing: Easing::EaseInOut,
+                easing_steps: 4,
+                reverse: false,
+            },
+        );
+        assert_eq!(raw.len(), 6);
+
+        let recipe = DitherRecipe::from_preset("gameboy").unwrap();
+        let anim_opts = AnimDitherOptions {
+            temporal: TemporalMode::Boil,
+            boil_rate: 2,
+            boil_amount: Some(0.06),
+            screen_drift: Some(ScreenDrift { dx: 1, dy: 0 }),
+            sweep_bias: Some(FloatRange {
+                start: -0.2,
+                end: 0.2,
+            }),
+            sweep_pixel_size: Some(U32Range { start: 4, end: 1 }),
+            cycle_palette: true,
+            ..Default::default()
+        };
+        let anim = dither_animation_frames(&raw, &recipe, &anim_opts).unwrap();
+        assert_eq!(anim.frames.len(), 6);
+        assert_eq!(anim.output_dimensions, [48, 36]);
+
+        let gif_bytes = encode_gif(&anim.frames, &anim.palette, 0, false).unwrap();
+        assert!(gif_bytes.starts_with(b"GIF89a"));
+
+        let apng_bytes = encode_apng(&anim.frames, 0).unwrap();
+        assert!(apng_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(
+            apng_bytes.windows(4).any(|w| w == b"acTL"),
+            "expected APNG acTL animation control chunk"
+        );
+
+        let (sheet, cols, rows) = compose_spritesheet(&anim.frames, Some(3));
+        assert_eq!((cols, rows), (3, 2));
+        assert_eq!(sheet.dimensions(), (48 * 3, 36 * 2));
+
+        // Verify decode_animated_frames decodes both GIF and APNG cleanly.
+        let dir = tempfile::tempdir().unwrap();
+        let gif_path = dir.path().join("loop.gif");
+        let apng_path = dir.path().join("loop.apng");
+        fs::write(&gif_path, &gif_bytes).unwrap();
+        fs::write(&apng_path, &apng_bytes).unwrap();
+        let dec_gif = decode_animated_frames(&gif_path, None, None)
+            .unwrap()
+            .expect("gif has multiple frames");
+        let dec_apng = decode_animated_frames(&apng_path, None, None)
+            .unwrap()
+            .expect("apng has multiple frames");
+        assert_eq!(dec_gif.len(), 6);
+        assert_eq!(dec_apng.len(), 6);
+    }
+
+    #[test]
+    fn ping_pong_and_holds_preserve_expected_delays() {
+        let img = RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 255]));
+        let mut frames = vec![
+            AnimFrame {
+                image: img.clone(),
+                delay_ms: 10,
+            },
+            AnimFrame {
+                image: img.clone(),
+                delay_ms: 20,
+            },
+            AnimFrame {
+                image: img.clone(),
+                delay_ms: 30,
+            },
+            AnimFrame {
+                image: img,
+                delay_ms: 40,
+            },
+        ];
+        apply_ping_pong(&mut frames);
+        apply_holds(&mut frames, 1, 2);
+        let delays: Vec<u32> = frames.iter().map(|f| f.delay_ms).collect();
+        assert_eq!(delays, vec![10, 10, 20, 30, 40, 30, 20, 20, 20]);
+    }
+}
