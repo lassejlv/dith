@@ -2,33 +2,122 @@
 name: dith
 description: >-
   Craft deterministic dithered images, vector SVGs, procedural art, and looping animations with the dith CLI.
-  Use when an agent needs to dither photos or assets, generate procedural dither graphics, animate GIFs/APNGs/spritesheets or film-boil loops, build algorithm/preset comparison contact sheets, save reusable local presets, render terminal previews, or batch-dither directories.
+  Use when an agent needs to dither photos, logos, or other assets; generate procedural dither graphics (hero backgrounds, orbs, mesh gradients, textures) with no input image;
+  animate GIFs, APNGs, spritesheets, film-boil loops, dissolves, or palette cycling; make 1-bit, Risograph, halftone, Game Boy, PICO-8, CRT, or other retro/print looks;
+  apply exact brand palettes; build algorithm/preset/palette comparison contact sheets; save reusable local presets or replayable JSON recipes;
+  render Braille/ASCII/Kitty terminal previews; or batch-dither many files.
 ---
 
 # Dith
 
-Use `dith` to produce deterministic, palette-exact dithered artwork, vector halftones, and animations with structured JSON reporting.
+`dith` is a deterministic dithering CLI built for agents. Every command takes `--json`, writes palette-exact output, and returns a machine-readable report. The same inputs and flags always produce byte-identical files.
 
-## Run the workflow
+## Setup
 
-1. Confirm `dith` is available (`dith --version`). Inside the `dith` source checkout without a global install, invoke via `mbx run -- ...` (or `cargo run --release -- ...`). If `dith` is missing, tell the user and offer the build/install command from [CLI reference](references/cli.md); wait for authorization before installing software.
-2. Query live capabilities instead of memorizing catalogs: run `dith capabilities` once for the full JSON manifest, or targeted `dith list presets|algorithms|palettes|generators --json` (filterable via `--tag` / `--category`).
-3. For existing photos or when the visual direction is open, run `dith inspect <input> --json` to read dimensions, luminance, dominant Oklab colors, and recommended commands. Render a labeled contact sheet with `dith compare <input> -o sheet.png --presets ... --json` when choosing between looks.
-4. Execute the render (`apply`, `generate`, `animate`, or `batch`) with `--json`. Run `--dry-run --json` first when validating complex flag sets or batch targets, and pass `--no-clobber` whenever existing files must stay untouched.
-5. Verify completion from the JSON output before reporting success: confirm `"status": "ok"`, expected `output_dimensions` (or `frame_count` and `frame_dimensions`), non-zero `bytes_written`, and expected `palette_colors` / `color_usage`. When aesthetic quality matters, visually inspect the saved image file directly (or pass `--preview` for an inline Braille thumbnail in the JSON report).
+1. Check for the binary with `dith --version`.
+   - Inside the dith source checkout without a global install, run it via `cargo run --release -- <args>` (or `mbx run -- <args>` when `mbx` is available).
+   - If dith is missing, tell the user and offer an install command from [references/cli.md](references/cli.md#install-update-or-run-from-source). Wait for their approval before installing anything.
+2. Do not rely on memorized catalogs when the exact set matters. Ask the binary:
+   - `dith list presets|algorithms|palettes|generators|formats --json`, filterable with `--tag <substr>` or `--category <name>`
+   - `dith capabilities` for the full manifest of commands, parameter ranges, and the default recipe (about 40 KB, so prefer `list` when one catalog is enough)
 
-## Choose flags and modes cleanly
+## Core workflow
 
-- **Structured I/O**: Pass `--json` on every agent invocation so stdout returns machine-readable results and errors return structured JSON (`code`, `suggestion`, `valid_values`) on stderr (exit `2` for invalid flags/slugs, exit `1` for I/O errors).
-- **Headless safety**: When showing terminal previews in non-interactive shells, pass `--inline` (or `--format kitty|braille|ascii`) rather than fullscreen `--view`, which targets interactive TTYs.
-- **Composable presets**: Start from `--preset <slug>` and override individual fields (`--algorithm`, `--colors`, `--pixel-size`, `--contrast`, `--sharpen`, `--max-dim`) instead of specifying every flag manually. Pass `--emit-recipe` to capture the exact resolved JSON recipe, or `--save-preset <slug>` to persist it.
-- **Local preset persistence**: Save repo-specific brand styles with `--scope project` (`.dith/presets/<slug>.json`) and personal defaults with `--scope user` (`~/.config/dith/presets/<slug>.json`). Lookup precedence is `$DITH_PRESETS_DIR` → `.dith/presets/` → `~/.config/dith/presets/` → built-ins.
-- **Tonal & palette craft**:
-  - Keep the default `--color-space oklab` for perceptually accurate gradients; switch to `--color-space srgb` only when replicating legacy hardware math.
-  - Pair soft photos with `--sharpen 0.3..0.6` (and `--auto-levels` on low-contrast inputs) before 1-bit or Atkinson dithering.
-  - Use `--auto-palette N` (`2..=64`) to extract optimal Oklab colors directly from the source image, or `--colors "#hex1,#hex2,..."` for exact brand palettes.
-  - Use `--pixel-size N` for chunky retro pixel grids while preserving output dimensions.
-- **Vector SVG sizing**: Keep `--max-dim` modest (`120..320`) when exporting `.svg` so markup stays lean. Use `--svg-shape rect` for crisp RLE-merged pixel art, or `--svg-shape circle|dot --svg-skip-bg` for halftone overlays.
-- **Animation stability**: `dith animate` accepts procedural pattern names, animated GIF/APNG/WebP files, numbered image sequences, or a single static photo (auto-defaults to `--temporal boil`). Keep the default shared global palette so colors stay steady across frames, and use `--ping-pong` or `--sweep-mode pulse` for seamless loops.
+1. **Understand the source.** For an existing image, run `dith inspect <image> --json`. It reports dimensions, transparency, luminance percentiles (`p5`/`p50`/`p95`), `dynamic_range`, dominant colors, and preset recommendations with ready-to-run commands.
+2. **Pick a starting point** from the [style guide](#choose-a-look) below. When the direction is open, render a contact sheet and look at it before committing:
+   `dith compare <image> -o sheet.png --presets mac-classic,editorial-print,risograph,film-stipple --json`
+3. **Validate complex flag sets first** with `--dry-run --json`. This catches bad values and shows planned `output_dimensions` without writing files.
+4. **Render** with `apply`, `generate`, `animate`, or `batch`, always with `--json`. Single-file commands overwrite existing outputs by default. Add `--no-clobber` when existing files must not be touched; in `batch` it applies to each file.
+5. **Verify before reporting success.** See [Verify the result](#verify-the-result).
+6. **Make it reproducible** when the look will be reused. Pass `--emit-recipe` (adds a `recipe` object to the report) or `--save-preset <name>` (writes `.dith/presets/<name>.json`).
 
-Read [CLI reference](references/cli.md) for install commands, subcommand recipes, stdin/stdout piping, and animation sweep syntax.
+## Choose a look
+
+Start from a preset, then override individual flags. Explicit flags always win over the preset.
+
+| Goal | Start with | Notes |
+| --- | --- | --- |
+| Classic 1-bit Mac / editorial portrait | `--preset mac-classic` (atkinson) | Atkinson drops 2/8 of the error, so highlights stay airy. Add `--sharpen 0.4` on soft photos. |
+| Refined monochrome print / newspaper | `--preset editorial-print` (ostromoukhov) | Smoothest gradients of the error-diffusion family. |
+| Filmic stipple, no grid artifacts | `--preset film-stipple` (blue-noise) | Best general modern look; also stable in animation. |
+| Risograph poster | `--preset risograph`, `risograph-red`, `risograph-duo` | Duotone and two-drum overprint looks on warm paper. |
+| Comic / zine halftone | `--preset halftone-zine` | Pair with `--format svg --svg-shape circle` for vector dots. |
+| Game Boy / pixel art | `--preset gameboy`, `pico8` | Ordered Bayer plus chunky `--pixel-size`. |
+| CRT / terminal glow | `--preset crt-amber`, `phosphor` | Dark-key images suit these best. |
+| Engraving / woodcut | `--preset woodcut`, `--algorithm crosshatch` | Line screens; tune with `--pattern-scale`. |
+| Blueprint / technical | `--preset blueprint` | Prussian blue and chalk duotone. |
+| Keep the photo's own colors | `--preset lo-fi-photo` or `--auto-palette N` | Extracts N Oklab colors (2–64) from the image. |
+| Exact brand colors | `--colors "#0f172a,#2563eb,#f5efe6"` | Combine with any algorithm or preset. |
+| Neon hero gradients / dark UI | `--preset vapor-mesh` with `generate mesh` | |
+
+[references/catalog.md](references/catalog.md) has every preset, palette, algorithm, and generator with when to use each.
+
+## Craft rules
+
+- **Tone before dithering.** Dithering amplifies flat or muddy input.
+  - Low `dynamic_range` (under about 0.5) or a narrow p5–p95 spread: add `--auto-levels` or `--contrast 0.1..0.3`.
+  - Soft photo going to 1-bit or Atkinson: `--sharpen 0.3..0.6`.
+  - Dark midtones: `--gamma 0.7..0.9` (values under 1 brighten). Bright, washed-out input: `--gamma 1.2..1.5`.
+  - Nudging overall density: `--bias` (negative is darker, positive is lighter, range ±0.5).
+- **Size first.** Cap with `--max-dim` (or `--width`/`--height` plus `--fit contain|cover|stretch`). Dither patterns are per-pixel, so a dithered image must never be resized afterwards. Render at the final display size instead.
+- **Chunky pixels.** `--pixel-size N` downsamples, dithers, then nearest-upscales, so output dimensions are unchanged.
+- **Ordered screen size.** `--pattern-scale 2..4` enlarges Bayer, halftone, line, and blue-noise cells for bolder, more graphic texture.
+- **Color space.** Keep the default `oklab`. Use `srgb` only to mimic legacy hardware math; `linear` is physically linear light.
+- **Determinism.** Stochastic algorithms (`blue-noise`, `random`, `ign`), `--noise`, and `--auto-palette` use `--seed` (default 42). Change the seed for variations and keep it fixed for reproducibility.
+- **Transparency.** Logos and icons with alpha: `--alpha-mode preserve` keeps the alpha channel, `threshold` gives a crisp 1-bit mask, `dither` gives a stippled fade, and `flatten --background "#hex"` composites onto a color.
+- **Turning off preset parts.** Most monochrome presets turn on `--grayscale` and `--auto-levels`. Use `--no-grayscale`, `--no-auto-levels`, and `--no-serpentine` to disable what a preset turned on.
+
+## Output formats
+
+The format is inferred from the `-o` extension; pass `--format` to override it.
+
+- **PNG** (default): lossless and pixel-exact. The right choice almost always.
+- **WebP**: compact for the web. **JPEG** destroys dither patterns, so never use it for dithered output unless the user insists.
+- **SVG**: `--svg-shape rect` (run-length merged rectangles, smallest), `circle` (halftone dots), or `dot` (inset dots). `--svg-skip-bg` drops the dominant background color for overlays. SVG grows with pixel count, and circles are much larger than rects, so keep `--max-dim` around 120–320.
+- **Terminal text**: `--format braille|ascii` with `--text-width N`. `-o` is optional and the text goes to stdout.
+- **Stdin/stdout**: pass `-` as input or as `-o -`.
+
+## Animation
+
+`dith animate` takes one of four kinds of input:
+- a pattern name (`sphere`, `waves`, `mesh`, `plasma`, ...) for a seamless procedural loop
+- an animated GIF, APNG, or WebP to re-dither
+- several image files as a frame sequence
+- a single static image, which gets film boil (`--temporal boil` is the default for this case)
+
+Output goes to `.gif` (exact palette, smallest), `.apng` (full RGBA), a spritesheet `.png` via `--anim-format spritesheet --sheet-cols N`, or numbered PNG frames via `--frames-dir DIR`.
+
+- **Flicker.** `--temporal locked` keeps static regions rock-solid. `boil` gives a hand-drawn shimmer; set `--boil-rate 2` to animate "on twos". `grain` re-randomizes stipple every frame.
+- **Seamless loops.** Procedural patterns loop by construction. For sweeps, use `--sweep-mode pulse` or `--ping-pong`.
+- **Sweeps** animate a parameter over time: `--sweep-bias`, `--sweep-brightness`, `--sweep-contrast`, `--sweep-gamma`, `--sweep-strength`, `--sweep-pixel-size`, each written `START..END`. Shape them with `--easing`, and pause on keyframes with `--hold-start` and `--hold-end`.
+- **Palette.** One shared global palette is the default and keeps colors steady. Use `--per-frame-palette` only for footage whose colors change a lot.
+- **Timing.** Frames are capped at 2..=240. `--duration S` is an alternative to `--frames` (frames = S × fps); passing both is an error. GIF delays are stored in 10 ms steps, so `--fps 10|20|25|50` gives exact GIF timing (15 fps becomes 70 ms per frame). APNG is exact.
+- **Size.** Keep procedural canvases modest (defaults are 480×360). File size grows with frames × pixels.
+
+## Verify the result
+
+Read the JSON report rather than assuming success:
+
+- `"status": "ok"`. `batch` can instead return `"partial_failure"` with exit code 1; check `failed` and each `items[].error`.
+- `output_dimensions` for images, or `frame_count`, `frame_dimensions`, and `total_duration_ms` for animations, match the intent.
+- `bytes_written > 0`; it is `0` on `--dry-run`.
+- `palette_colors` and `color_usage` are as expected. If one color covers more than about 95% of pixels, the image is nearly blank: adjust `--bias`, `--gamma`, or `--contrast`, or try `--invert`.
+
+When aesthetics matter, look at the output. Open PNG files with an image-viewing tool if you have one; otherwise add `--preview` to get a Braille thumbnail in `preview_braille`. For animations, export a spritesheet or `--frames-dir` and view the PNG frames. For SVGs, render a PNG with the same flags and view that.
+
+## Errors
+
+With `--json`, errors go to stderr as `{"status":"error","code","message","suggestion","valid_values"?}`.
+
+- **Exit 2**: invalid input from you. Codes include `CLI_USAGE_ERROR`, `INVALID_ARGUMENT` (an out-of-range value; the message includes the range), `UNKNOWN_PRESET` and similar codes (`valid_values` lists the options), and `OUTPUT_EXISTS` (`--no-clobber` hit an existing file). Fix the flags and retry.
+- **Exit 1**: runtime or I/O failure (`RUNTIME_ERROR`), such as a missing input or an undecodable file. `batch` also exits 1 when any item fails.
+
+## Interactive vs headless
+
+`--view`, `preview` (fullscreen by default), and `compare --view` are interactive Kitty-protocol viewers meant for a human at a terminal. In non-interactive agent shells, render to files, use `--preview` or `--format braille`, or pass `--inline` (for example `dith preview img.png --inline --mode braille --cols 60`). Only use the fullscreen viewer when the user explicitly wants to watch in their own terminal.
+
+## References
+
+- [references/cli.md](references/cli.md): every subcommand and flag, with ranges, defaults, and JSON report fields.
+- [references/catalog.md](references/catalog.md): presets, palettes, algorithms, and generators, and when to choose each.
+- [references/recipes.md](references/recipes.md): copy-ready recipes for common jobs (web hero, avatar, logo SVG, social card, CSS spritesheet, reveal GIF, brand preset, batch export).
