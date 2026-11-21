@@ -4,7 +4,7 @@ This is a snapshot of the catalogs built into the release. For the authoritative
 
 ## Presets
 
-Pass a preset with `--preset <id>` (or `-P`). Any explicit flag overrides the matching preset field. To see the full resolved recipe of a preset, run `dith preset show <id> --json`.
+Pass a preset with `--preset <id>` (or `-P`). Any explicit flag overrides the matching preset field. To see the full resolved recipe of a preset, run `dith preset show <id> --json`. On procedural sources (`generate`, `animate <pattern>`, `--pattern`), the preset's auto-levels, contrast, and sharpen are skipped unless passed explicitly.
 
 | id | Algorithm | Palette | Look |
 | --- | --- | --- | --- |
@@ -74,7 +74,7 @@ Pass an algorithm with `--algorithm <id>` (or `-a`).
 
 ### Error diffusion
 
-Error diffusion gives organic, detailed results. Serpentine scanning is on by default.
+Error diffusion gives organic, detailed results. Serpentine scanning is on by default. In animation, any change spreads to neighbouring pixels (`temporally_stable: false`), so moving content makes static areas shimmer and GIFs grow. Atkinson is the least affected.
 
 | id | Best for |
 | --- | --- |
@@ -90,7 +90,7 @@ Error diffusion gives organic, detailed results. Serpentine scanning is on by de
 
 ### Ordered screens
 
-Ordered screens give a regular, graphic texture. They are the most stable choice for animation and respond to `--pattern-scale`.
+Ordered screens give a regular, graphic texture and respond to `--pattern-scale`. Each pixel depends only on itself (`temporally_stable: true`), so with `--temporal locked` static areas never flicker and GIFs stay small.
 
 | id | Best for |
 | --- | --- |
@@ -107,7 +107,7 @@ Ordered screens give a regular, graphic texture. They are the most stable choice
 
 ### Stochastic
 
-Stochastic algorithms are noise-based and grid-free. They respond to `--seed`.
+Stochastic algorithms are noise-based and grid-free. They respond to `--seed`. `blue-noise`, `ign`, and `random` are per-pixel thresholds, so they are stable in locked animation. `riemersma` is error diffusion along a curve and is not.
 
 | id | Best for |
 | --- | --- |
@@ -130,16 +130,18 @@ Generators are procedural sources for `generate`, `animate`, `compare --pattern`
 - `--frequency` (default 1.0)
 - `--stops "#a,#b,..."`: source colors, interpolated in Oklab, before the dither palette is applied
 
-| id | Use for |
-| --- | --- |
-| `linear-gradient` | Hero backgrounds, banners, cards, tonal smoothness tests |
-| `radial-gradient` | Spotlight backdrops, glowing orbs, covers |
-| `mesh` | Modern SaaS/AI hero visuals, album art, abstract posters |
-| `sphere` | A shaded 3D orb that shows off Atkinson, halftone, and Risograph looks |
-| `waves` | Editorial dividers, kinetic posters, woodcut and scanline looks |
-| `noise` | fBm clouds, paper and mist textures |
-| `rings` | Hypnotic zine covers, optical posters |
-| `plasma` | Retro demos, synthwave, palette cycling |
-| `checkerboard` | Architectural graphics, retro UI tiles |
+| id | Use for | When animated |
+| --- | --- | --- |
+| `linear-gradient` | Hero backgrounds, banners, cards, tonal smoothness tests | Gradient direction rotates 360° per loop |
+| `radial-gradient` | Spotlight backdrops, glowing orbs, covers | Glow center orbits a small circle while its radius pulses |
+| `mesh` | Modern SaaS/AI hero visuals, album art, abstract posters | Color anchors orbit small circles, so colors drift and blend |
+| `sphere` | A shaded 3D orb that shows off Atkinson, halftone, and Risograph looks | Sphere stays still; the light orbits 360°, moving the highlight |
+| `waves` | Editorial dividers, kinetic posters, woodcut and scanline looks | Ribbons flow one wavelength per loop |
+| `noise` | fBm clouds, paper and mist textures | Clouds drift along a circle and billow |
+| `rings` | Hypnotic zine covers, optical posters | Rings ripple outward |
+| `plasma` | Retro demos, synthwave, palette cycling | Field cycles through its period |
+| `checkerboard` | Architectural graphics, retro UI tiles | Grid scrolls diagonally while the vignette light orbits |
+
+`--motion-amplitude` scales the motion (0 = still, 2 = dramatic). For rings, plasma, and checkerboard it sets the whole number of cycles per loop. `--cycles` repeats the whole motion several times per loop. `dith list generators --json` has the exact `motion` text.
 
 `--stops` sets the colors of the source image. The dither palette (`--palette`, `--colors`, or the preset's palette) decides the final ink colors. To get the stops' hues in the output, pass the same hexes to `--colors`, or use `--auto-palette`.

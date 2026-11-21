@@ -133,6 +133,28 @@ dith animate plasma -o crt.gif \
   --screen-drift 1,0 --frames 24 --fps 20 --json
 ```
 
+### Check a pattern's motion before rendering it big
+
+```sh
+dith animate sphere -o motion-check.png \
+  --anim-format spritesheet --sheet-cols 8 --frames 8 \
+  --canvas-width 160 --canvas-height 120 --preset risograph --json
+```
+
+Look at the strip to see what moves and in which direction. Then render the real size.
+
+### Fit an animation under a file-size budget
+
+```sh
+dith animate sphere -o orb.gif \
+  --preset film-stipple --stops "#0f172a,#94a3b8,#f8fafc" \
+  --frames 36 --fps 20 --canvas-width 800 --canvas-height 600 \
+  --max-size 1MB --json
+```
+
+- Check `bytes_written`, `frame_dimensions`, and `size_fit_scale` in the report.
+- If the scale is very small, lower the cost another way and retry: fewer `--frames`, a locked ordered algorithm (`--algorithm bayer4 --temporal locked`), or fewer palette colors.
+
 ### Re-dither an existing GIF/APNG/WebP
 
 ```sh

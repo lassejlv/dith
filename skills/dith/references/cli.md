@@ -163,6 +163,8 @@ dith generate <PATTERN> -o <PATH|-> [shared flags] [options]
 
 It also accepts `--no-clobber`, `--dry-run`, `--emit-recipe`, `--save-preset`/`--preset-scope`, `--preview`, and `--view`/`--inline`. The patterns are listed in the [catalog](catalog.md#generators).
 
+With `--preset`, procedural sources skip the preset's photo preparation (auto-levels, contrast, sharpen) unless you pass those flags explicitly. This also applies to `animate <pattern>`, `compare --pattern`, and `preview --pattern`.
+
 ## animate
 
 ```sh
@@ -179,6 +181,7 @@ You must pass `-o`, `--frames-dir`, or `--view`. `--pattern <name>` forces proce
 | `--sheet-cols <N>` | Spritesheet columns. Use `N = frames` for a single row. The report has `spritesheet_grid: [cols, rows]`. |
 | `--frames-dir <DIR>` | Also (or only) write `frame_0001.png`, ... |
 | `--loops <N>` | 0 = infinite (default). |
+| `--max-size <SIZE>` | File-size budget such as `2MB`, `500KB`, `1.5MiB`, or bytes (KB/MB are 1000-based). Re-renders at smaller frame dimensions, keeping frames and fps, until the output fits. Needs `-o` with gif, apng, or spritesheet output. Fails with `INVALID_ARGUMENT` if it can't fit even at 8 px. The report has `max_size_bytes` and `size_fit_scale`. |
 
 **Timing**
 
@@ -195,7 +198,7 @@ You must pass `-o`, `--frames-dir`, or `--view`. `--pattern <name>` forces proce
 
 | Option | Notes |
 | --- | --- |
-| `--temporal locked\|boil\|grain` | Default `locked`, or `boil` for a single still input. |
+| `--temporal locked\|boil\|grain` | Default `locked`, or `boil` for a single still input. `locked` fixes screen and seed; static pixels stay identical only with per-pixel algorithms (`temporally_stable: true` in `dith list algorithms --json`). Error diffusion still shimmers around motion. |
 | `--boil-rate <N>` | Update the boil every N frames (2 = on twos). Default 1. |
 | `--boil-amount <f>` | 0.0..=0.5 jitter intensity. |
 | `--screen-drift <dx,dy>` | Per-frame drift of ordered or halftone screens, in cells. |
@@ -220,6 +223,7 @@ You must pass `-o`, `--frames-dir`, or `--view`. `--pattern <name>` forces proce
 **Procedural source**
 
 - `--canvas-width`/`--canvas-height` (defaults 480×360), `--angle`, `--frequency`, `--stops`
+- What each pattern does over time is in `dith list generators --json` (`motion`), and in the [catalog](catalog.md#generators).
 
 **Other**
 
@@ -299,6 +303,7 @@ dith preset delete <name> [--scope project|user | --dir DIR] --json
 - `preset`, `algorithm`, `color_space`, `palette_name`, `palette_colors[]`
 - `source_dimensions`, `frame_dimensions`
 - `spritesheet_grid` (spritesheets only)
+- `max_size_bytes`, `size_fit_scale` (only with `--max-size`)
 - `bytes_written`, `elapsed_ms`, `color_usage[]`
 
 **compare**

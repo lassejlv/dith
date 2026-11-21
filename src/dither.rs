@@ -77,6 +77,10 @@ pub struct AlgorithmInfo {
     pub best_for: &'static str,
     pub supports_serpentine: bool,
     pub supports_seed: bool,
+    /// `true` when each output pixel depends only on that pixel's input (ordered screens, noise
+    /// thresholds). With `--temporal locked` such algorithms leave unchanged regions identical
+    /// across animation frames; error diffusion propagates any change to neighbouring pixels.
+    pub temporally_stable: bool,
 }
 
 impl Algorithm {
@@ -150,6 +154,7 @@ impl Algorithm {
                 description: "Classic 4-neighbor error diffusion (7/3/5/1)",
                 best_for: "General-purpose photography, crisp detail, multi-color palettes",
                 supports_serpentine: true,
+                temporally_stable: false,
                 supports_seed: false,
             },
             Self::Atkinson => AlgorithmInfo {
@@ -159,6 +164,7 @@ impl Algorithm {
                 description: "Bill Atkinson's MacPaint kernel diffusing 6/8 of error for airy highlights",
                 best_for: "1-bit editorial art, portraits, classic Macintosh look, high contrast",
                 supports_serpentine: true,
+                temporally_stable: false,
                 supports_seed: false,
             },
             Self::JarvisJudiceNinke => AlgorithmInfo {
@@ -168,6 +174,7 @@ impl Algorithm {
                 description: "Wide 12-neighbor diffusion across 3 rows",
                 best_for: "Smooth photographic gradations and rich tonal transitions",
                 supports_serpentine: true,
+                temporally_stable: false,
                 supports_seed: false,
             },
             Self::Stucki => AlgorithmInfo {
@@ -177,6 +184,7 @@ impl Algorithm {
                 description: "Crisp, high-acuity 12-neighbor variant of JJN",
                 best_for: "Sharp architectural/editorial prints and Risograph posters",
                 supports_serpentine: true,
+                temporally_stable: false,
                 supports_seed: false,
             },
             Self::Burkes => AlgorithmInfo {
@@ -186,6 +194,7 @@ impl Algorithm {
                 description: "Fast 2-row 7-neighbor diffusion with clean diagonals",
                 best_for: "Clean illustrations and fast batch processing",
                 supports_serpentine: true,
+                temporally_stable: false,
                 supports_seed: false,
             },
             Self::Sierra => AlgorithmInfo {
@@ -195,6 +204,7 @@ impl Algorithm {
                 description: "3-row 10-neighbor diffusion with balanced fine grain",
                 best_for: "Natural photography with smooth shadow transitions",
                 supports_serpentine: true,
+                temporally_stable: false,
                 supports_seed: false,
             },
             Self::SierraTwoRow => AlgorithmInfo {
@@ -204,6 +214,7 @@ impl Algorithm {
                 description: "Lighter 2-row Sierra kernel with crisp structure",
                 best_for: "Portraits and UI graphics",
                 supports_serpentine: true,
+                temporally_stable: false,
                 supports_seed: false,
             },
             Self::SierraLite => AlgorithmInfo {
@@ -213,6 +224,7 @@ impl Algorithm {
                 description: "Minimal 3-neighbor diffusion (2/1/1)",
                 best_for: "Lightweight vintage stippling and small icons",
                 supports_serpentine: true,
+                temporally_stable: false,
                 supports_seed: false,
             },
             Self::Ostromoukhov => AlgorithmInfo {
@@ -222,6 +234,7 @@ impl Algorithm {
                 description: "Tone-adaptive variable-coefficient diffusion eliminating worm artifacts",
                 best_for: "Gallery-quality monochrome & duotone prints, smooth gradients",
                 supports_serpentine: true,
+                temporally_stable: false,
                 supports_seed: false,
             },
             Self::Bayer2 => AlgorithmInfo {
@@ -231,6 +244,7 @@ impl Algorithm {
                 description: "Tiny 2x2 ordered threshold matrix",
                 best_for: "Chunky bold retro graphics and graphic icons",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::Bayer4 => AlgorithmInfo {
@@ -240,6 +254,7 @@ impl Algorithm {
                 description: "Iconic 4x4 ordered crosshatch pattern",
                 best_for: "Game Boy / pixel art, web hero textures, animation-stable dithers",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::Bayer8 => AlgorithmInfo {
@@ -249,6 +264,7 @@ impl Algorithm {
                 description: "64-level ordered Bayer screen",
                 best_for: "Smooth retro displays, gradients, CRT / cyberpunk aesthetics",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::Bayer16 => AlgorithmInfo {
@@ -258,6 +274,7 @@ impl Algorithm {
                 description: "256-level ultra-fine ordered matrix",
                 best_for: "Subtle web backgrounds and smooth ordered color ramps",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::Halftone => AlgorithmInfo {
@@ -267,6 +284,7 @@ impl Algorithm {
                 description: "8x8 rotated 45-degree clustered-dot screen",
                 best_for: "Newspaper, comic, zine, pop-art, and poster prints",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::ClusteredDot => AlgorithmInfo {
@@ -276,6 +294,7 @@ impl Algorithm {
                 description: "Tight 4x4 clustered dot screen",
                 best_for: "Bold graphic halftones at smaller resolutions",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::DiagonalLines => AlgorithmInfo {
@@ -285,6 +304,7 @@ impl Algorithm {
                 description: "45-degree copperplate engraving line screen",
                 best_for: "Woodcut, currency engraving, and stylized editorial graphics",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::HorizontalLines => AlgorithmInfo {
@@ -294,6 +314,7 @@ impl Algorithm {
                 description: "Horizontal line-weight screen",
                 best_for: "CRT monitors, broadcast vibes, minimalist striped art",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::VerticalLines => AlgorithmInfo {
@@ -303,6 +324,7 @@ impl Algorithm {
                 description: "Vertical fluted line-weight screen",
                 best_for: "Architectural posters and fluted-glass graphic textures",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::Crosshatch => AlgorithmInfo {
@@ -312,6 +334,7 @@ impl Algorithm {
                 description: "Multi-density pen-and-ink diagonal crosshatching screen",
                 best_for: "Illustration, sketch, and archival bookplate looks",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::BlueNoise => AlgorithmInfo {
@@ -321,6 +344,7 @@ impl Algorithm {
                 description: "64x64 Void-and-Cluster tileable blue-noise mask",
                 best_for: "Organic filmic stippling, modern web hero art, artifact-free gradients",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
             Self::Ign => AlgorithmInfo {
@@ -330,6 +354,7 @@ impl Algorithm {
                 description: "High-frequency non-repeating Jimenez gradient noise",
                 best_for: "Clean modern digital grain with zero tiling artifacts",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: true,
             },
             Self::Riemersma => AlgorithmInfo {
@@ -339,6 +364,7 @@ impl Algorithm {
                 description: "Error diffusion along a Hilbert space-filling curve",
                 best_for: "Organic painterly stipple with zero directional bias",
                 supports_serpentine: false,
+                temporally_stable: false,
                 supports_seed: false,
             },
             Self::Random => AlgorithmInfo {
@@ -348,6 +374,7 @@ impl Algorithm {
                 description: "Reproducible white-noise threshold dithering",
                 best_for: "Gritty lo-fi photocopy / punk zine textures",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: true,
             },
             Self::Threshold => AlgorithmInfo {
@@ -357,6 +384,7 @@ impl Algorithm {
                 description: "Direct nearest-palette posterization with zero dithering",
                 best_for: "Clean graphic stencils, silkscreen, and baseline comparisons",
                 supports_serpentine: false,
+                temporally_stable: true,
                 supports_seed: false,
             },
         }

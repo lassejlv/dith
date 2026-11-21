@@ -80,19 +80,24 @@ The format is inferred from the `-o` extension; pass `--format` to override it.
 ## Animation
 
 `dith animate` takes one of four kinds of input:
-- a pattern name (`sphere`, `waves`, `mesh`, `plasma`, ...) for a seamless procedural loop
+- a pattern name (`sphere`, `waves`, `mesh`, `plasma`, ...) for a seamless procedural loop. Each pattern moves differently (the sphere stays still while its light orbits, for example); the `motion` field of `dith list generators --json` describes it. To check the motion cheaply before a full render, export a small spritesheet (`--anim-format spritesheet --sheet-cols <frames> --canvas-width 160 --canvas-height 120`) and look at it.
 - an animated GIF, APNG, or WebP to re-dither
 - several image files as a frame sequence
 - a single static image, which gets film boil (`--temporal boil` is the default for this case)
 
 Output goes to `.gif` (exact palette, smallest), `.apng` (full RGBA), a spritesheet `.png` via `--anim-format spritesheet --sheet-cols N`, or numbered PNG frames via `--frames-dir DIR`.
 
-- **Flicker.** `--temporal locked` keeps static regions rock-solid. `boil` gives a hand-drawn shimmer; set `--boil-rate 2` to animate "on twos". `grain` re-randomizes stipple every frame.
+- **Flicker.** `--temporal locked` (the default) fixes the screen and seed across frames, but it only makes static regions rock-solid with per-pixel algorithms: ordered screens (`bayer*`, `halftone`, line screens), `blue-noise`, `ign`, `random`, and `threshold`. Error diffusion (`floyd-steinberg`, `atkinson`, `stucki`, `riemersma`, ...) passes every change on to neighbouring pixels, so anything that moves makes the stipple shimmer below and to the right of it. Atkinson shimmers least. The `temporally_stable` field of `dith list algorithms --json` says which is which. `boil` gives a hand-drawn shimmer on purpose; set `--boil-rate 2` to animate "on twos". `grain` re-randomizes stipple every frame.
 - **Seamless loops.** Procedural patterns loop by construction. For sweeps, use `--sweep-mode pulse` or `--ping-pong`.
 - **Sweeps** animate a parameter over time: `--sweep-bias`, `--sweep-brightness`, `--sweep-contrast`, `--sweep-gamma`, `--sweep-strength`, `--sweep-pixel-size`, each written `START..END`. Shape them with `--easing`, and pause on keyframes with `--hold-start` and `--hold-end`.
 - **Palette.** One shared global palette is the default and keeps colors steady. Use `--per-frame-palette` only for footage whose colors change a lot.
 - **Timing.** Frames are capped at 2..=240. `--duration S` is an alternative to `--frames` (frames = S × fps); passing both is an error. GIF delays are stored in 10 ms steps, so `--fps 10|20|25|50` gives exact GIF timing (15 fps becomes 70 ms per frame). APNG is exact.
-- **Size.** Keep procedural canvases modest (defaults are 480×360). File size grows with frames × pixels.
+- **Size.** File size grows with frames × pixels, and dither noise barely compresses.
+  - GIFs are delta-encoded automatically: each frame after the first only stores what changed. Locked per-pixel algorithms with static areas are therefore far smaller than error diffusion or `boil`/`grain`, where nearly every pixel changes each frame.
+  - To hit a budget, pass `--max-size 2MB` (also `500KB`, `1.5MiB`, or bytes). Dith shrinks the frame dimensions, keeping frame count and fps, until the file fits, and reports `size_fit_scale` (1.0 = untouched). If `size_fit_scale` comes back small (under about 0.5), the result may be too small to use. Lower the size another way instead: fewer frames, a locked ordered algorithm, or fewer palette colors.
+  - Keep procedural canvases modest (defaults are 480×360).
+- **Procedural colors.** Without `--stops`, patterns use a plain near-black → near-white ramp. Pass `--stops` to choose the source tones deliberately; it usually looks better, especially with a colored palette.
+- **Presets on procedural sources.** Presets are tuned for photos. For `generate`, `animate <pattern>`, and `compare`/`preview --pattern`, dith skips their auto-levels, contrast, and sharpen, because those clip clean gradients into flat patches. Pass those flags explicitly to apply them anyway.
 
 ## Verify the result
 

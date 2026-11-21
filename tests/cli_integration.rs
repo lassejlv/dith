@@ -703,3 +703,185 @@ fn animated_dithers_support_procedural_gif_apng_spritesheet_and_photo_boil() {
     assert_eq!(custom_json["frame_count"], 6); // 0.5s * 12fps
     assert!(custom_gif.exists());
 }
+
+fn run_json(args: &[&str]) -> (bool, Value, Value) {
+    let out = dith_bin().args(args).output().unwrap();
+    let stdout = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    let stderr = serde_json::from_slice(&out.stderr).unwrap_or(Value::Null);
+    (out.status.success(), stdout, stderr)
+}
+
+#[test]
+fn catalogs_describe_generator_motion_and_algorithm_temporal_stability() {
+    let (ok, gens, _) = run_json(&["list", "generators", "--json"]);
+    assert!(ok);
+    for g in gens.as_array().unwrap() {
+        assert!(
+            g["motion"].as_str().is_some_and(|m| !m.is_empty()),
+            "generator {} lacks a motion description",
+            g["id"]
+        );
+    }
+
+    let (ok, algos, _) = run_json(&["list", "algorithms", "--json"]);
+    assert!(ok);
+    let stable = |id: &str| {
+        algos
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id)
+            .unwrap()["temporally_stable"]
+            .as_bool()
+            .unwrap()
+    };
+    assert!(stable("bayer4"));
+    assert!(stable("blue-noise"));
+    assert!(!stable("atkinson"));
+    assert!(!stable("riemersma"));
+}
+
+#[test]
+fn animate_max_size_shrinks_frames_until_the_file_fits() {
+    let dir = TempDir::new().unwrap();
+    let out = dir.path().join("fit.gif");
+    let out_s = out.to_str().unwrap();
+    let base = [
+        "animate",
+        "sphere",
+        "-o",
+        out_s,
+        "--algorithm",
+        "blue-noise",
+        "--temporal",
+        "grain",
+        "--frames",
+        "12",
+        "--canvas-width",
+        "320",
+        "--canvas-height",
+        "240",
+        "--json",
+    ];
+
+    let (ok, full, _) = run_json(&base);
+    assert!(ok);
+    let full_bytes = full["bytes_written"].as_u64().unwrap();
+
+    let limit = full_bytes / 3;
+    let limit_arg = limit.to_string();
+    let mut args = base.to_vec();
+    args.extend(["--max-size", &limit_arg]);
+    let (ok, fit, err) = run_json(&args);
+    assert!(ok, "max-size failed: {err}");
+    let written = fit["bytes_written"].as_u64().unwrap();
+    assert!(written <= limit, "{written} > {limit}");
+    assert_eq!(std::fs::metadata(&out).unwrap().len(), written);
+    assert_eq!(fit["frame_count"], 12, "frame count must be preserved");
+    assert_eq!(fit["max_size_bytes"].as_u64(), Some(limit));
+    let scale = fit["size_fit_scale"].as_f64().unwrap();
+    assert!(scale < 1.0 && scale > 0.2, "scale {scale}");
+    let dims = fit["frame_dimensions"].as_array().unwrap();
+    assert!(dims[0].as_u64().unwrap() < 320);
+
+    // An impossible budget fails with a structured, actionable error.
+    let mut args = base.to_vec();
+    args.extend(["--max-size", "50B"]);
+    let (ok, _, err) = run_json(&args);
+    assert!(!ok);
+    assert_eq!(err["code"], "INVALID_ARGUMENT");
+    assert!(err["message"].as_str().unwrap().contains("max-size"));
+
+    // --max-size without an encoded output is rejected.
+    let frames_dir = dir.path().join("frames");
+    let (ok, _, err) = run_json(&[
+        "animate",
+        "sphere",
+        "--frames-dir",
+        frames_dir.to_str().unwrap(),
+        "--max-size",
+        "1MB",
+        "--json",
+    ]);
+    assert!(!ok);
+    assert_eq!(err["code"], "INVALID_ARGUMENT");
+}
+
+#[test]
+fn procedural_sources_skip_preset_photo_prep_unless_flags_are_explicit() {
+    let prep = |args: &[&str]| {
+        let (ok, report, err) = run_json(args);
+        assert!(ok, "{err}");
+        report["recipe"]["preprocess"].clone()
+    };
+
+    let generated = prep(&[
+        "generate",
+        "sphere",
+        "-o",
+        "x.png",
+        "--preset",
+        "risograph",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(generated["auto_levels"], false);
+    assert_eq!(generated["contrast"], 0.0);
+    assert_eq!(generated["sharpen"], 0.0);
+
+    let explicit = prep(&[
+        "generate",
+        "sphere",
+        "-o",
+        "x.png",
+        "--preset",
+        "risograph",
+        "--auto-levels",
+        "--contrast",
+        "0.2",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(explicit["auto_levels"], true);
+    assert!((explicit["contrast"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+
+    let animated = prep(&[
+        "animate",
+        "sphere",
+        "-o",
+        "x.gif",
+        "--preset",
+        "risograph",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(animated["auto_levels"], false);
+
+    // Photos keep the preset's full preparation.
+    let dir = TempDir::new().unwrap();
+    let photo = dir.path().join("photo.png");
+    let (ok, _, err) = run_json(&[
+        "generate",
+        "noise",
+        "-o",
+        photo.to_str().unwrap(),
+        "--canvas-width",
+        "32",
+        "--canvas-height",
+        "32",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    let applied = prep(&[
+        "apply",
+        photo.to_str().unwrap(),
+        "-o",
+        "y.png",
+        "--preset",
+        "risograph",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(applied["auto_levels"], true);
+    assert!(applied["sharpen"].as_f64().unwrap() > 0.0);
+}

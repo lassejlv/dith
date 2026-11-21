@@ -11,9 +11,9 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::animate::{
-    AnimDitherOptions, AnimFormat, AnimFrame, Easing, FloatRange, ProceduralMotion, ScreenDrift,
-    SweepMode, TemporalMode, U32Range, apply_holds, apply_ping_pong, compose_spritesheet,
-    decode_animated_frames, dither_animation_frames, encode_apng, encode_gif,
+    AnimDitherOptions, AnimFormat, AnimFrame, AnimatedOutput, Easing, FloatRange, ProceduralMotion,
+    ScreenDrift, SweepMode, TemporalMode, U32Range, apply_holds, apply_ping_pong,
+    compose_spritesheet, decode_animated_frames, dither_animation_frames, encode_apng, encode_gif,
     generate_procedural_frames, write_frames_directory,
 };
 use crate::color::{ColorSpace, Rgb};
@@ -274,6 +274,19 @@ impl DitherFlags {
     /// # Errors
     /// Returns a [`RecipeError`] if the recipe JSON, preset, or custom colors are invalid.
     pub fn resolve_recipe(&self, allow_stdin_recipe: bool) -> Result<DitherRecipe, RecipeError> {
+        self.resolve_recipe_for(allow_stdin_recipe, false)
+    }
+
+    /// Like [`Self::resolve_recipe`], but for `procedural` sources a preset's photo preparation
+    /// (auto-levels, contrast, sharpen) is dropped unless those flags are passed explicitly.
+    ///
+    /// # Errors
+    /// Returns a [`RecipeError`] if the recipe JSON, preset, or custom colors are invalid.
+    pub fn resolve_recipe_for(
+        &self,
+        allow_stdin_recipe: bool,
+        procedural: bool,
+    ) -> Result<DitherRecipe, RecipeError> {
         let mut recipe = if let Some(path) = &self.recipe {
             let raw = if path.as_os_str() == "-" {
                 if !allow_stdin_recipe {
@@ -301,6 +314,9 @@ impl DitherFlags {
 
         if let Some(preset_name) = &self.preset {
             recipe = DitherRecipe::from_preset(preset_name)?;
+            if procedural {
+                recipe.strip_photo_prep();
+            }
         }
 
         // Apply explicit palette overrides (priority: --colors > --palette-file > --auto-palette > --palette).
@@ -585,7 +601,9 @@ pub struct AnimateArgs {
     #[arg(long, default_value_t = 0)]
     pub loops: u16,
 
-    /// Temporal dither mode across frames (locked = rock-solid, boil = Risograph film boil, grain = lively stipple).
+    /// Temporal dither mode across frames (locked = fixed screen, boil = Risograph film boil, grain = lively stipple).
+    /// Locked is only flicker-free with per-pixel algorithms (ordered screens, blue-noise, ign, random); error
+    /// diffusion propagates motion into static areas.
     #[arg(long, value_enum)]
     pub temporal: Option<TemporalMode>,
 
@@ -680,6 +698,11 @@ pub struct AnimateArgs {
     /// Number of columns when exporting --anim-format spritesheet.
     #[arg(long)]
     pub sheet_cols: Option<u32>,
+
+    /// Maximum output file size, e.g. "2MB", "500KB", "1.5MiB", or plain bytes. Shrinks frame
+    /// dimensions (keeping frame count, fps, and look) until the GIF / APNG / spritesheet fits.
+    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
+    pub max_size: Option<u64>,
 
     /// Canvas width in pixels for procedural animations (default 480).
     #[arg(long = "canvas-width", default_value_t = 480)]
@@ -1426,7 +1449,7 @@ fn handle_apply(args: &ApplyArgs, as_json: bool) -> Result<()> {
 }
 
 fn handle_generate(args: &GenerateArgs, as_json: bool) -> Result<()> {
-    let mut recipe = args.flags.resolve_recipe(true)?;
+    let mut recipe = args.flags.resolve_recipe_for(true, true)?;
     let wants_view = args.view || args.fullscreen;
     let wants_fullscreen = wants_view && !args.inline;
     let format = resolve_output_format(args.output.as_deref(), recipe.export.format, wants_view)?;
@@ -1612,6 +1635,11 @@ struct AnimateReport {
     frame_dimensions: [u32; 2],
     #[serde(skip_serializing_if = "Option::is_none")]
     spritesheet_grid: Option<[u32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_size_bytes: Option<u64>,
+    /// Linear scale applied to frame dimensions to satisfy `--max-size` (1.0 = untouched).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_fit_scale: Option<f32>,
     bytes_written: usize,
     elapsed_ms: u128,
     color_usage: Vec<ColorUsage>,
@@ -1656,7 +1684,8 @@ fn resolve_animate_source(args: &AnimateArgs) -> AnimateSource {
 }
 
 fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
-    let mut recipe = args.flags.resolve_recipe(true)?;
+    let procedural = matches!(resolve_animate_source(args), AnimateSource::Procedural(_));
+    let mut recipe = args.flags.resolve_recipe_for(true, procedural)?;
     let wants_view = args.view || args.fullscreen;
     let wants_fullscreen = wants_view && !args.inline;
 
@@ -1719,6 +1748,14 @@ fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
     {
         return Err(RecipeError::OutputExists {
             path: path.display().to_string(),
+        }
+        .into());
+    }
+
+    if args.max_size.is_some() && (args.output.is_none() || anim_format == AnimFormat::Frames) {
+        return Err(RecipeError::Validation {
+            field: "max-size",
+            reason: "needs -o with a .gif, .apng, or spritesheet .png output".to_string(),
         }
         .into());
     }
@@ -1814,6 +1851,8 @@ fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
             source_dimensions: [src_w, src_h],
             frame_dimensions: [out_w, out_h],
             spritesheet_grid: None,
+            max_size_bytes: args.max_size,
+            size_fit_scale: None,
             bytes_written: 0,
             elapsed_ms: 0,
             color_usage: Vec::new(),
@@ -1941,7 +1980,76 @@ fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
     }
     apply_holds(&mut raw_frames, args.hold_start, args.hold_end);
 
-    let anim = dither_animation_frames(&raw_frames, &recipe, &anim_dither_opts)?;
+    let mut anim = dither_animation_frames(&raw_frames, &recipe, &anim_dither_opts)?;
+    let encode = |anim: &AnimatedOutput| -> Result<(Vec<u8>, Option<[u32; 2]>)> {
+        Ok(match anim_format {
+            AnimFormat::Gif => (
+                encode_gif(
+                    &anim.frames,
+                    &anim.palette,
+                    args.loops,
+                    args.per_frame_palette,
+                )?,
+                None,
+            ),
+            AnimFormat::Apng => (encode_apng(&anim.frames, u32::from(args.loops))?, None),
+            AnimFormat::Spritesheet => {
+                let (sheet, cols, rows) = compose_spritesheet(&anim.frames, args.sheet_cols);
+                (encode_png_bytes(&sheet)?, Some([cols, rows]))
+            }
+            AnimFormat::Frames => (Vec::new(), None),
+        })
+    };
+    let mut encoded = if args.output.is_some() {
+        Some(encode(&anim)?)
+    } else {
+        None
+    };
+
+    let mut size_fit_scale = None;
+    if let (Some(limit), Some((bytes, _))) = (args.max_size, encoded.as_ref()) {
+        let limit_f = limit as f64;
+        let mut size = bytes.len() as u64;
+        let base = anim.output_dimensions;
+        let mut scale = 1.0f64;
+        // File size of dithered frames scales roughly with pixel area, so shrink both sides by
+        // sqrt(limit / size) with a small safety margin and re-render until it fits.
+        for _ in 0..8 {
+            if size <= limit {
+                break;
+            }
+            scale *= ((limit_f / size as f64).sqrt() * 0.95).clamp(0.3, 0.95);
+            let fit_w = ((f64::from(base[0]) * scale).round() as u32).max(1);
+            let fit_h = ((f64::from(base[1]) * scale).round() as u32).max(1);
+            if fit_w.min(fit_h) < 8 {
+                break;
+            }
+            let pre = &mut recipe.preprocess;
+            if pre.width.is_none() || pre.height.is_none() {
+                pre.fit = FitMode::Stretch;
+            }
+            pre.width = Some(fit_w);
+            pre.height = Some(fit_h);
+            pre.max_dim = None;
+            pre.scale = None;
+            anim = dither_animation_frames(&raw_frames, &recipe, &anim_dither_opts)?;
+            let next = encode(&anim)?;
+            size = next.0.len() as u64;
+            encoded = Some(next);
+        }
+        if size > limit {
+            return Err(RecipeError::Validation {
+                field: "max-size",
+                reason: format!(
+                    "could not fit under {limit} bytes; the smallest attempt was {size} bytes at {}x{}. Reduce --frames or --duration, use an ordered algorithm (e.g. bayer4) with --temporal locked, use fewer palette colors, or raise --max-size",
+                    anim.output_dimensions[0], anim.output_dimensions[1]
+                ),
+            }
+            .into());
+        }
+        size_fit_scale = Some(((scale * 1000.0).round() / 1000.0) as f32);
+    }
+
     let total_duration_ms: u64 = anim.frames.iter().map(|f| u64::from(f.delay_ms)).sum();
     let effective_fps = if total_duration_ms > 0 {
         ((anim.frames.len() as f64 * 1000.0) / total_duration_ms as f64)
@@ -1959,25 +2067,10 @@ fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
     }
 
     if let Some(out_path) = &args.output {
-        let bytes = match anim_format {
-            AnimFormat::Gif => encode_gif(
-                &anim.frames,
-                &anim.palette,
-                args.loops,
-                args.per_frame_palette,
-            )?,
-            AnimFormat::Apng => encode_apng(&anim.frames, u32::from(args.loops))?,
-            AnimFormat::Spritesheet => {
-                let (sheet, cols, rows) = compose_spritesheet(&anim.frames, args.sheet_cols);
-                spritesheet_grid = Some([cols, rows]);
-                encode_png_bytes(&sheet)?
-            }
-            AnimFormat::Frames => {
-                write_frames_directory(&anim.frames, out_path)?;
-                Vec::new()
-            }
-        };
-        if !bytes.is_empty() {
+        if anim_format == AnimFormat::Frames {
+            write_frames_directory(&anim.frames, out_path)?;
+        } else if let Some((bytes, grid)) = encoded {
+            spritesheet_grid = grid;
             write_output_file(out_path, &bytes)?;
             bytes_written = bytes.len();
         }
@@ -2003,6 +2096,8 @@ fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         source_dimensions: anim.source_dimensions,
         frame_dimensions: anim.output_dimensions,
         spritesheet_grid,
+        max_size_bytes: args.max_size,
+        size_fit_scale,
         bytes_written,
         elapsed_ms: anim.elapsed_ms,
         color_usage: anim.histogram,
@@ -2056,6 +2151,37 @@ fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Parse a human byte size such as `2MB`, `500KB`, `1.5MiB`, or `750000` (decimal units are 1000-based).
+fn parse_byte_size(raw: &str) -> Result<u64, String> {
+    let trimmed = raw.trim();
+    let split = trimmed
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(trimmed.len());
+    let (num, unit) = trimmed.split_at(split);
+    let value: f64 = num
+        .parse()
+        .map_err(|_| format!("invalid size '{raw}' (expected e.g. 2MB, 500KB, or 750000)"))?;
+    let multiplier: f64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" => 1e3,
+        "kib" => 1024.0,
+        "m" | "mb" => 1e6,
+        "mib" => 1024.0 * 1024.0,
+        "g" | "gb" => 1e9,
+        "gib" => 1024.0 * 1024.0 * 1024.0,
+        other => {
+            return Err(format!(
+                "unknown size unit '{other}' (use B, KB, MB, GB, KiB, MiB, or GiB)"
+            ));
+        }
+    };
+    let bytes = (value * multiplier).round();
+    if bytes < 1.0 {
+        return Err(format!("size '{raw}' must be at least 1 byte"));
+    }
+    Ok(bytes as u64)
+}
+
 fn print_animate_summary(report: &AnimateReport) {
     let dest = report
         .output
@@ -2097,7 +2223,8 @@ struct PreviewReport {
 
 fn handle_preview(args: &PreviewArgs, as_json: bool) -> Result<()> {
     let reading_stdin = args.input.as_deref() == Some(Path::new("-"));
-    let mut recipe = args.flags.resolve_recipe(!reading_stdin)?;
+    let procedural = args.input.is_none() && args.pattern.is_some();
+    let mut recipe = args.flags.resolve_recipe_for(!reading_stdin, procedural)?;
     let use_fullscreen = !args.inline;
     let interactive_fullscreen = use_fullscreen && !as_json && io::stdout().is_terminal();
 
@@ -2448,7 +2575,9 @@ fn handle_compare(args: &CompareArgs, as_json: bool) -> Result<()> {
         .into());
     }
 
-    let base_recipe = args.flags.resolve_recipe(true)?;
+    let base_recipe = args
+        .flags
+        .resolve_recipe_for(true, args.input.is_none() && args.pattern.is_some())?;
     let variant_specs = build_compare_variants(args, &base_recipe)?;
 
     let source_label = match (&args.input, args.pattern) {
@@ -2637,7 +2766,10 @@ fn build_compare_variants(
             .presets
             .iter()
             .map(|name| {
-                let rec = DitherRecipe::from_preset(name)?;
+                let mut rec = DitherRecipe::from_preset(name)?;
+                if args.input.is_none() && args.pattern.is_some() {
+                    rec.strip_photo_prep();
+                }
                 Ok((rec.preset.clone().unwrap_or_else(|| name.clone()), rec))
             })
             .collect();
@@ -3001,5 +3133,22 @@ fn palette_spec_label(spec: &PaletteSpec) -> String {
         PaletteSpec::Colors(c) => format!("custom({} colors)", c.len()),
         PaletteSpec::File(p) => format!("file:{}", p.display()),
         PaletteSpec::Adaptive(n) => format!("auto-{n}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_byte_size;
+
+    #[test]
+    fn byte_sizes_parse_with_decimal_and_binary_units() {
+        assert_eq!(parse_byte_size("750000"), Ok(750_000));
+        assert_eq!(parse_byte_size("500KB"), Ok(500_000));
+        assert_eq!(parse_byte_size("2mb"), Ok(2_000_000));
+        assert_eq!(parse_byte_size("1.5 MiB"), Ok(1_572_864));
+        assert_eq!(parse_byte_size("1KiB"), Ok(1024));
+        assert!(parse_byte_size("2XB").is_err());
+        assert!(parse_byte_size("MB").is_err());
+        assert!(parse_byte_size("0").is_err());
     }
 }

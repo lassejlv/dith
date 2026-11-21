@@ -250,7 +250,8 @@ impl SweepMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TemporalMode {
-    /// Fixed dither screen & seed across frames (temporally rock-solid, zero flicker on static regions).
+    /// Fixed screen & seed across frames. Ordered, blue-noise, ign, and random algorithms leave unchanged
+    /// pixels identical; error diffusion still shimmers downstream of anything that moves.
     #[default]
     Locked,
     /// Hand-drawn Risograph / 16mm film boil using golden-ratio shifted screen offsets & subtle jitter.
@@ -273,7 +274,7 @@ impl TemporalMode {
     pub const fn description(self) -> &'static str {
         match self {
             Self::Locked => {
-                "Fixed screen across frames (silky smooth, zero flicker — Obra Dinn / Playdate style)"
+                "Fixed screen & seed across frames. With ordered, blue-noise, ign, or random algorithms unchanged pixels stay identical (zero flicker); error-diffusion algorithms still shimmer below/right of anything that moves (Atkinson least)"
             }
             Self::Boil => {
                 "Subtle hand-drawn Risograph / 16mm film boil via frame-shifted blue noise & micro-jitter"
@@ -767,6 +768,10 @@ fn apply_palette_cycle(img: &mut RgbaImage, palette: &Palette, frame_idx: usize,
 /// When the palette has `<= 255` entries, writes the exact palette directly as the GIF Global Color
 /// Table (zero `NeuQuant` color drift, exact hex preservation, and ~10x faster encoding).
 ///
+/// Opaque exact-palette animations are also delta-encoded: every frame after the first only stores
+/// the bounding box of pixels that changed, with unchanged pixels inside it written as a reserved
+/// transparent index so static regions compress to almost nothing.
+///
 /// # Errors
 /// Returns an error if frames are empty, exceed 65535px, or GIF encoding fails.
 pub fn encode_gif(
@@ -786,26 +791,30 @@ pub fn encode_gif(
         .any(|f| f.image.pixels().any(|px| px[3] < 128));
     let can_use_exact_palette =
         !per_frame_palette && palette.len() <= if has_transparency { 255 } else { 256 };
+    // Delta frames rely on `DisposalMethod::Keep`, which is only valid for fully opaque animations.
+    let delta_encode = can_use_exact_palette && !has_transparency;
 
     let mut out = Vec::new();
     {
         let mut color_table: Vec<u8> = Vec::new();
         let mut color_to_idx: HashMap<[u8; 3], u8> = HashMap::new();
-        let transparent_idx: Option<u8> = if can_use_exact_palette {
+        // Reserved index: real transparency for alpha animations, or "unchanged" marker for deltas.
+        let reserved_idx: Option<u8> = if can_use_exact_palette {
             for (i, c) in palette.colors().iter().enumerate() {
                 color_table.extend_from_slice(&[c.r, c.g, c.b]);
                 color_to_idx.insert([c.r, c.g, c.b], i as u8);
             }
-            if has_transparency {
-                let tidx = palette.len() as u8;
+            if palette.len() < 256 && (has_transparency || delta_encode) {
                 color_table.extend_from_slice(&[0, 0, 0]);
-                Some(tidx)
+                Some(palette.len() as u8)
             } else {
                 None
             }
         } else {
             None
         };
+        let transparent_idx = if has_transparency { reserved_idx } else { None };
+        let unchanged_idx = if delta_encode { reserved_idx } else { None };
 
         let mut encoder =
             gif::Encoder::new(&mut out, w, h, &color_table).context("initializing GIF encoder")?;
@@ -818,39 +827,74 @@ pub fn encode_gif(
             .set_repeat(repeat)
             .context("setting GIF loop count")?;
 
-        for frame in frames {
-            let delay_cs = ((frame.delay_ms + 5) / 10).clamp(2, u32::from(u16::MAX)) as u16;
-            if can_use_exact_palette {
-                let mut indices = Vec::with_capacity((w as usize) * (h as usize));
-                for px in frame.image.pixels() {
-                    if let Some(tidx) = transparent_idx
-                        && px[3] < 128
-                    {
-                        indices.push(tidx);
-                        continue;
+        if can_use_exact_palette {
+            // Map every frame to palette indices, then LZW-compress candidates in parallel.
+            let index_frames: Vec<Vec<u8>> = frames
+                .par_iter()
+                .map(|frame| {
+                    frame
+                        .image
+                        .pixels()
+                        .map(|px| {
+                            if let Some(tidx) = transparent_idx
+                                && px[3] < 128
+                            {
+                                return tidx;
+                            }
+                            let rgb = [px[0], px[1], px[2]];
+                            color_to_idx.get(&rgb).copied().unwrap_or_else(|| {
+                                palette.nearest_index_from_srgb(
+                                    Rgb::new(rgb[0], rgb[1], rgb[2]).to_srgb_f32(),
+                                ) as u8
+                            })
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let lzw_frames: Vec<gif::Frame<'static>> = (0..index_frames.len())
+                .into_par_iter()
+                .map(|i| {
+                    let cur = &index_frames[i];
+                    if i == 0 || !delta_encode {
+                        let mut gf =
+                            gif::Frame::from_indexed_pixels(w, h, cur.clone(), transparent_idx);
+                        gf.make_lzw_pre_encoded();
+                        return gf;
                     }
-                    let rgb = [px[0], px[1], px[2]];
-                    let idx = color_to_idx.get(&rgb).copied().unwrap_or_else(|| {
-                        palette
-                            .nearest_index_from_srgb(Rgb::new(rgb[0], rgb[1], rgb[2]).to_srgb_f32())
-                            as u8
-                    });
-                    indices.push(idx);
-                }
-                let mut gf = gif::Frame::from_indexed_pixels(w, h, indices, transparent_idx);
-                gf.delay = delay_cs;
+                    let prev = &index_frames[i - 1];
+                    // Try the changed-region crop as-is and with unchanged pixels marked
+                    // transparent; keep whichever compresses smaller (marking helps static
+                    // regions but hurts when nearly every pixel boils).
+                    let mut best = delta_frame(prev, cur, w, None);
+                    best.make_lzw_pre_encoded();
+                    if unchanged_idx.is_some() {
+                        let mut marked = delta_frame(prev, cur, w, unchanged_idx);
+                        marked.make_lzw_pre_encoded();
+                        if marked.buffer.len() < best.buffer.len() {
+                            best = marked;
+                        }
+                    }
+                    best
+                })
+                .collect();
+
+            for (mut gf, frame) in lzw_frames.into_iter().zip(frames) {
+                gf.delay = ((frame.delay_ms + 5) / 10).clamp(2, u32::from(u16::MAX)) as u16;
                 gf.dispose = if has_transparency {
                     gif::DisposalMethod::Background
                 } else {
                     gif::DisposalMethod::Keep
                 };
                 encoder
-                    .write_frame(&gf)
+                    .write_lzw_pre_encoded_frame(&gf)
                     .context("writing exact-palette GIF frame")?;
-            } else {
+            }
+        } else {
+            for frame in frames {
                 let mut rgba = frame.image.as_raw().clone();
                 let mut gf = gif::Frame::from_rgba_speed(w, h, &mut rgba, 10);
-                gf.delay = delay_cs;
+                gf.delay = ((frame.delay_ms + 5) / 10).clamp(2, u32::from(u16::MAX)) as u16;
                 gf.dispose = gif::DisposalMethod::Background;
                 encoder.write_frame(&gf).context("writing GIF frame")?;
             }
@@ -858,6 +902,59 @@ pub fn encode_gif(
     }
 
     Ok(out)
+}
+
+/// Build a GIF sub-frame holding only the bounding box of pixels that differ from `prev`.
+/// With `unchanged_idx`, unchanged pixels inside the box are written as that (transparent) index
+/// so they show the kept previous frame.
+fn delta_frame(prev: &[u8], cur: &[u8], w: u16, unchanged_idx: Option<u8>) -> gif::Frame<'static> {
+    let width = usize::from(w);
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+    for (y, (prow, crow)) in prev
+        .chunks_exact(width)
+        .zip(cur.chunks_exact(width))
+        .enumerate()
+    {
+        if let Some(first) = prow.iter().zip(crow).position(|(a, b)| a != b) {
+            let last = prow
+                .iter()
+                .zip(crow)
+                .rposition(|(a, b)| a != b)
+                .unwrap_or(first);
+            x0 = x0.min(first);
+            x1 = x1.max(last);
+            y0 = y0.min(y);
+            y1 = y1.max(y);
+        }
+    }
+
+    if x0 == usize::MAX {
+        // Identical frame: emit a single pixel that leaves the canvas untouched.
+        let pixel = unchanged_idx.unwrap_or(cur[0]);
+        let mut gf = gif::Frame::from_indexed_pixels(1, 1, vec![pixel], unchanged_idx);
+        gf.left = 0;
+        gf.top = 0;
+        return gf;
+    }
+
+    let bw = x1 - x0 + 1;
+    let bh = y1 - y0 + 1;
+    let mut data = Vec::with_capacity(bw * bh);
+    for y in y0..=y1 {
+        let row = y * width;
+        for x in x0..=x1 {
+            let c = cur[row + x];
+            data.push(match unchanged_idx {
+                Some(t) if prev[row + x] == c => t,
+                _ => c,
+            });
+        }
+    }
+    // Bounding box lies inside the u16 canvas, so these conversions cannot truncate.
+    let mut gf = gif::Frame::from_indexed_pixels(bw as u16, bh as u16, data, unchanged_idx);
+    gf.left = x0 as u16;
+    gf.top = y0 as u16;
+    gf
 }
 
 /// Encode dithered animation frames as a lossless 32-bit RGBA Animated PNG (`loops == 0` -> infinite).
@@ -1060,6 +1157,103 @@ mod tests {
             .expect("apng has multiple frames");
         assert_eq!(dec_gif.len(), 6);
         assert_eq!(dec_apng.len(), 6);
+    }
+
+    fn assert_gif_roundtrips_exactly(frames: &[AnimFrame], palette: &Palette) -> usize {
+        let bytes = encode_gif(frames, palette, 0, false).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roundtrip.gif");
+        fs::write(&path, &bytes).unwrap();
+        let decoded = decode_gif_frames(&path, None, None).unwrap();
+        assert_eq!(decoded.len(), frames.len());
+        for (i, (dec, src)) in decoded.iter().zip(frames).enumerate() {
+            assert_eq!(
+                dec.image.dimensions(),
+                src.image.dimensions(),
+                "frame {i} size"
+            );
+            for (d, s) in dec.image.pixels().zip(src.image.pixels()) {
+                assert_eq!(
+                    &d.0[..3],
+                    &s.0[..3],
+                    "frame {i} differs after delta encoding"
+                );
+                assert_eq!(d.0[3], 255, "frame {i} has unexpected transparency");
+            }
+        }
+        bytes.len()
+    }
+
+    #[test]
+    fn delta_encoded_gif_decodes_to_identical_frames() {
+        let gen_opts = GenerateOptions {
+            pattern: Pattern::Sphere,
+            width: 64,
+            height: 48,
+            ..Default::default()
+        };
+        let mut raw = generate_procedural_frames(
+            &gen_opts,
+            ProceduralMotion {
+                frame_count: 8,
+                fps: 10,
+                cycles: 1.0,
+                phase_offset: 0.0,
+                easing: Easing::Linear,
+                easing_steps: 4,
+                reverse: false,
+            },
+        );
+        // Holds produce identical consecutive frames, exercising the empty-diff path.
+        apply_holds(&mut raw, 0, 2);
+
+        for (preset, temporal) in [
+            ("mac-classic", TemporalMode::Locked),
+            ("film-stipple", TemporalMode::Locked),
+            ("gameboy", TemporalMode::Boil),
+            ("pico8", TemporalMode::Grain),
+        ] {
+            let recipe = DitherRecipe::from_preset(preset).unwrap();
+            let anim_opts = AnimDitherOptions {
+                temporal,
+                ..Default::default()
+            };
+            let anim = dither_animation_frames(&raw, &recipe, &anim_opts).unwrap();
+            assert_gif_roundtrips_exactly(&anim.frames, &anim.palette);
+        }
+    }
+
+    #[test]
+    fn delta_encoding_shrinks_static_regions() {
+        // A static image with a small moving square: deltas should be far smaller than full frames.
+        let frames: Vec<AnimFrame> = (0..10u32)
+            .map(|i| {
+                let mut img = RgbaImage::from_fn(120, 90, |x, y| {
+                    if (x + y) % 2 == 0 {
+                        Rgba([0, 0, 0, 255])
+                    } else {
+                        Rgba([255, 255, 255, 255])
+                    }
+                });
+                for y in 10..20 {
+                    for x in (i * 8)..(i * 8 + 10) {
+                        img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+                    }
+                }
+                AnimFrame {
+                    image: img,
+                    delay_ms: 100,
+                }
+            })
+            .collect();
+        let palette = Palette::from_hex_list("#000000,#ffffff").unwrap();
+        let delta_size = assert_gif_roundtrips_exactly(&frames, &palette);
+        let single = encode_gif(&frames[..1], &palette, 0, false).unwrap().len();
+        assert!(
+            delta_size < single * 3,
+            "10 delta frames ({delta_size} B) should cost far less than 10 full frames (~{} B)",
+            single * 10
+        );
     }
 
     #[test]

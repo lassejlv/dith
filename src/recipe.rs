@@ -161,6 +161,15 @@ pub struct DitherRecipe {
 }
 
 impl DitherRecipe {
+    /// Drop photo-oriented preparation (auto-levels, contrast boost, sharpening) that presets tune
+    /// for real photographs. Procedural sources are already clean and full-range, and those steps
+    /// would clip their highlights into flat patches.
+    pub const fn strip_photo_prep(&mut self) {
+        self.preprocess.auto_levels = false;
+        self.preprocess.contrast = 0.0;
+        self.preprocess.sharpen = 0.0;
+    }
+
     /// Construct a recipe seeded from a saved local preset or built-in preset.
     ///
     /// Local lookup order: `$DITH_PRESETS_DIR` -> `.dith/presets/` -> `~/.config/dith/presets/` -> built-in.

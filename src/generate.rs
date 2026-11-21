@@ -42,6 +42,8 @@ pub struct PatternInfo {
     pub name: &'static str,
     pub description: &'static str,
     pub best_for: &'static str,
+    /// What moves when the pattern is animated with `dith animate <pattern>`.
+    pub motion: &'static str,
 }
 
 impl Pattern {
@@ -80,54 +82,63 @@ impl Pattern {
                 name: "Linear Gradient",
                 description: "Smooth directional Oklab gradient across arbitrary color stops",
                 best_for: "Hero backgrounds, banners, cards, testing dithering tonal smoothness",
+                motion: "Gradient direction rotates a full 360 degrees per loop (times --motion-amplitude).",
             },
             Self::RadialGradient => PatternInfo {
                 id: "radial-gradient",
                 name: "Radial Glow",
                 description: "Atmospheric radial gradient with configurable focal center",
                 best_for: "Spotlight backdrops, glowing orbs, editorial covers",
+                motion: "Glow center orbits a small circle (8% of the canvas) while its radius gently pulses.",
             },
             Self::Mesh => PatternInfo {
                 id: "mesh",
                 name: "Aurora Mesh",
                 description: "Seeded multi-anchor organic mesh gradient in Oklab space",
                 best_for: "Modern SaaS/AI hero visuals, album art, abstract posters",
+                motion: "Each color anchor orbits its own small circle, alternating directions, so the colors drift and blend.",
             },
             Self::Sphere => PatternInfo {
                 id: "sphere",
                 name: "Lit 3D Sphere",
                 description: "Analytically shaded 3D sphere with rim light and studio vignette",
                 best_for: "Showcasing Atkinson, Halftone, Blue Noise, and Risograph aesthetics",
+                motion: "Sphere stays still; the key light orbits 360 degrees around it, moving the highlight and terminator. --motion-amplitude only changes the light's tilt wobble.",
             },
             Self::Waves => PatternInfo {
                 id: "waves",
                 name: "Silk Waves",
                 description: "Layered sinusoidal interference ribbons",
                 best_for: "Editorial dividers, kinetic posters, woodcut & scanline dithers",
+                motion: "Ribbons flow and undulate, advancing one full wavelength per loop.",
             },
             Self::Noise => PatternInfo {
                 id: "noise",
                 name: "Organic fBm Noise",
                 description: "Multi-octave smooth value-noise clouds and topographic fields",
                 best_for: "Textured backgrounds, subtle paper/mist art, blue-noise stipples",
+                motion: "Cloud field drifts along a circular path, with alternate octaves moving in opposite directions so it billows.",
             },
             Self::Rings => PatternInfo {
                 id: "rings",
                 name: "Concentric Rings",
                 description: "Rippled radial wave rings radiating from a focal point",
                 best_for: "Hypnotic zine covers, optical posters, Bayer & halftone tests",
+                motion: "Rings ripple outward from the center by round(--motion-amplitude) wavelengths per loop.",
             },
             Self::Plasma => PatternInfo {
                 id: "plasma",
                 name: "Smooth Plasma",
                 description: "Classic multi-frequency continuous plasma field",
                 best_for: "Retro demos, synthwave backdrops, PICO-8 and cyber-magenta presets",
+                motion: "Plasma field cycles through round(--motion-amplitude) full periods per loop.",
             },
             Self::Checkerboard => PatternInfo {
                 id: "checkerboard",
                 name: "Shaded Checkerboard",
                 description: "Soft-lit geometric grid with subtle radial vignette",
                 best_for: "Architectural graphics, retro UI tiles, graphic posters",
+                motion: "Grid scrolls diagonally 2 x round(--motion-amplitude) cells per loop while the vignette light orbits.",
             },
         }
     }
@@ -382,7 +393,7 @@ fn render_sphere(
                 .powf(28.0);
             // Gentle Fresnel rim light so dark edge separates cleanly from backdrop.
             let rim = (1.0 - nz).powf(2.6) * 0.28;
-            (0.08 + diffuse * 0.78 + spec * 0.42 + rim).clamp(0.0, 1.0)
+            highlight_shoulder(0.08 + diffuse * 0.78 + spec * 0.42 + rim)
         } else {
             // Subtle studio backdrop gradient + soft floor glow.
             let bg_y = y as f32 * inv_hm1;
@@ -392,6 +403,17 @@ fn render_sphere(
 
         sample_stops(stops, val)
     })
+}
+
+/// Soft highlight roll-off: values above the knee compress smoothly towards 1.0 instead of
+/// clipping, so bright highlights keep tonal detail rather than becoming a flat patch.
+fn highlight_shoulder(v: f32) -> f32 {
+    const KNEE: f32 = 0.78;
+    if v <= KNEE {
+        return v.max(0.0);
+    }
+    let headroom = 1.0 - KNEE;
+    (KNEE + headroom * (1.0 - (-(v - KNEE) / headroom).exp())).min(1.0)
 }
 
 fn render_waves(
