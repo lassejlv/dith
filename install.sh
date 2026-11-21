@@ -8,18 +8,23 @@ INSTALL_SKILLS=1
 if [ "${DITH_NO_SKILLS:-0}" = "1" ]; then
   INSTALL_SKILLS=0
 fi
+ASSUME_YES=0
+if [ "${DITH_YES:-0}" = "1" ]; then
+  ASSUME_YES=1
+fi
 
 usage() {
   cat <<'EOF'
 Install dith CLI and agent skills.
 
 Usage:
-  install.sh [--version <tag>] [--dir <path>] [--no-skills]
+  install.sh [--version <tag>] [--dir <path>] [--no-skills] [--yes]
 
 Options:
   --version <tag>  Install a specific release tag (e.g. v0.1.0); defaults to latest
   --dir <path>     Install directory (default: ~/.local/bin)
   --no-skills      Skip installing agent skills
+  -y, --yes        Install agent skills into every detected agent without asking
   -h, --help       Show this help message
 EOF
 }
@@ -44,6 +49,10 @@ while [ $# -gt 0 ]; do
       ;;
     --no-skills)
       INSTALL_SKILLS=0
+      shift
+      ;;
+    -y|--yes)
+      ASSUME_YES=1
       shift
       ;;
     -h|--help)
@@ -125,6 +134,128 @@ verify_checksum() {
   fi
 }
 
+# Agents that load skills from a global directory. A skill is only installed
+# for an agent whose config directory already exists.
+add_agent() {
+  # $1 = display name, $2 = agent config dir, $3 = skills dir
+  if [ -d "$2" ]; then
+    AGENT_NAMES+=("$1")
+    AGENT_DIRS+=("$3")
+  fi
+}
+
+detect_agents() {
+  AGENT_NAMES=()
+  AGENT_DIRS=()
+  local claude_home="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  local codex_home="${CODEX_HOME:-$HOME/.codex}"
+  local xdg_config="${XDG_CONFIG_HOME:-$HOME/.config}"
+
+  add_agent "Claude Code"    "$claude_home"              "$claude_home/skills"
+  add_agent "Codex"          "$codex_home"               "$codex_home/skills"
+  add_agent "Cursor"         "$HOME/.cursor"             "$HOME/.cursor/skills"
+  add_agent "Gemini CLI"     "$HOME/.gemini"             "$HOME/.gemini/skills"
+  add_agent "OpenCode"       "$xdg_config/opencode"      "$xdg_config/opencode/skills"
+  add_agent "GitHub Copilot" "$HOME/.copilot"            "$HOME/.copilot/skills"
+  add_agent "Windsurf"       "$HOME/.codeium/windsurf"   "$HOME/.codeium/windsurf/skills"
+  add_agent "Factory Droid"  "$HOME/.factory"            "$HOME/.factory/skills"
+  add_agent "Shared agents"  "$HOME/.agents"             "$HOME/.agents/skills"
+}
+
+# Ask a yes/no question on the terminal. Reads from /dev/tty so it works when
+# the script itself is piped in (curl ... | bash). Without a terminal the
+# answer is "no" unless --yes was given.
+confirm() {
+  if [ "$ASSUME_YES" -eq 1 ]; then
+    return 0
+  fi
+  local reply=""
+  printf '%s [y/N] ' "$1" 2>/dev/null >/dev/tty || return 1
+  read -r reply 2>/dev/null </dev/tty || return 1
+  case "$reply" in
+    y|Y|yes|Yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Download the repository source for the installed release and print the path
+# of its skills/ directory.
+fetch_skills() {
+  local work_dir="$1"
+  local ref="" url
+  if [ "$VERSION" = "latest" ]; then
+    ref="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
+    ref="${ref##*/}"
+    case "$ref" in
+      v*) ;;
+      *) ref="" ;;
+    esac
+  else
+    ref="$VERSION"
+  fi
+
+  if [ -n "$ref" ]; then
+    url="https://github.com/${REPO}/archive/refs/tags/${ref}.tar.gz"
+  else
+    url="https://github.com/${REPO}/archive/HEAD.tar.gz"
+  fi
+
+  mkdir -p "${work_dir}/src"
+  curl -fsSL "$url" -o "${work_dir}/source.tar.gz" || return 1
+  tar -xzf "${work_dir}/source.tar.gz" -C "${work_dir}/src" || return 1
+
+  local dir
+  for dir in "${work_dir}"/src/*/skills; do
+    if [ -d "$dir" ]; then
+      echo "$dir"
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_skills() {
+  local work_dir="$1"
+
+  detect_agents
+  if [ "${#AGENT_NAMES[@]}" -eq 0 ]; then
+    echo "Note: no supported coding agents found; skipped agent skill setup"
+    return 0
+  fi
+
+  echo ""
+  echo "Found these coding agents:"
+  local i
+  for i in "${!AGENT_NAMES[@]}"; do
+    printf '  %-15s %s\n' "${AGENT_NAMES[$i]}" "${AGENT_DIRS[$i]}/dith"
+  done
+
+  if ! confirm "Install the dith agent skill for these agents?"; then
+    echo "Skipped agent skill setup (run with --yes to install without asking)"
+    return 0
+  fi
+
+  local skills_src
+  if ! skills_src="$(fetch_skills "$work_dir")"; then
+    echo "Note: skipped agent skill setup (could not download skills)"
+    return 0
+  fi
+
+  local skill name dest
+  for i in "${!AGENT_DIRS[@]}"; do
+    for skill in "$skills_src"/*/; do
+      [ -f "${skill}SKILL.md" ] || continue
+      name="$(basename "$skill")"
+      dest="${AGENT_DIRS[$i]}/${name}"
+      if mkdir -p "${AGENT_DIRS[$i]}" && rm -rf "$dest" && cp -R "${skill%/}" "$dest"; then
+        echo "Installed ${name} skill for ${AGENT_NAMES[$i]}"
+      else
+        echo "Note: could not install ${name} skill for ${AGENT_NAMES[$i]} (${dest})"
+      fi
+    done
+  done
+}
+
 main() {
   if ! command -v curl >/dev/null 2>&1; then
     echo "error: curl is required to download dith" >&2
@@ -179,17 +310,7 @@ main() {
   echo "Installed ${installed_ver} to ${INSTALL_DIR}/dith"
 
   if [ "$INSTALL_SKILLS" -eq 1 ]; then
-    echo "Installing agent skills..."
-    local runner="n""px"
-    if command -v "$runner" >/dev/null 2>&1; then
-      if "$runner" --yes skills add "$REPO" -g -y </dev/null >/dev/null 2>&1; then
-        echo "Installed dith agent skill"
-      else
-        echo "Note: skipped agent skill setup (could not complete automatically)"
-      fi
-    else
-      echo "Note: skipped agent skill setup (Node.js runtime not found)"
-    fi
+    install_skills "$tmp_dir"
   fi
 
   case ":${PATH}:" in

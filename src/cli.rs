@@ -1108,7 +1108,10 @@ fn handle_update(args: &UpdateArgs, as_json: bool) -> Result<()> {
             report.current_version, report.latest_version, report.target, report.install_path
         );
         if report.skills_updated {
-            println!("Refreshed dith agent skill");
+            println!(
+                "Refreshed dith agent skill for {}",
+                report.skills_agents.join(", ")
+            );
         }
     } else if report.update_available {
         println!(

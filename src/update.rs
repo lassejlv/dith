@@ -1,5 +1,6 @@
 //! Self-update command (`dith update`) pulling prebuilt release tarballs from GitHub Releases.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -35,6 +36,8 @@ pub struct UpdateReport {
     pub install_path: String,
     pub release_url: String,
     pub skills_updated: bool,
+    /// Coding agents whose global skills directory received the refreshed dith skill.
+    pub skills_agents: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,6 +165,7 @@ pub fn run_update(opts: &UpdateOptions) -> Result<UpdateReport> {
             install_path: install_path.display().to_string(),
             release_url: release.html_url,
             skills_updated: false,
+            skills_agents: Vec::new(),
         });
     }
 
@@ -189,14 +193,17 @@ pub fn run_update(opts: &UpdateOptions) -> Result<UpdateReport> {
             .map(|a| a.browser_download_url.as_str()),
         &install_path,
     );
-    let _ = fs::remove_dir_all(&stage_dir);
-    result?;
+    if let Err(err) = result {
+        let _ = fs::remove_dir_all(&stage_dir);
+        return Err(err);
+    }
 
-    let skills_updated = if opts.no_skills {
-        false
+    let skills_agents = if opts.no_skills {
+        Vec::new()
     } else {
-        refresh_agent_skills_silently()
+        refresh_agent_skills_silently(&stage_dir, &release.tag_name)
     };
+    let _ = fs::remove_dir_all(&stage_dir);
 
     Ok(UpdateReport {
         status: "ok",
@@ -207,7 +214,8 @@ pub fn run_update(opts: &UpdateOptions) -> Result<UpdateReport> {
         target,
         install_path: install_path.display().to_string(),
         release_url: release.html_url,
-        skills_updated,
+        skills_updated: !skills_agents.is_empty(),
+        skills_agents,
     })
 }
 
@@ -368,15 +376,140 @@ fn create_staging_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Silently refresh global agent skills using the skills CLI without echoing runner output.
-fn refresh_agent_skills_silently() -> bool {
-    Command::new("npx")
-        .args(["--yes", "skills", "add", GITHUB_REPO, "-g", "-y"])
+/// Global skills directories of coding agents installed under `home`.
+///
+/// An agent counts as installed when its config directory exists. `env` resolves environment
+/// overrides (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CONFIG_HOME`); empty values are ignored.
+/// Keep this list in sync with `detect_agents` in `install.sh`.
+fn detect_agent_skill_dirs(
+    home: &Path,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Vec<(&'static str, PathBuf)> {
+    let dir_from_env = |var: &str, fallback: PathBuf| {
+        env(var)
+            .filter(|value| !value.is_empty())
+            .map_or(fallback, PathBuf::from)
+    };
+    let claude = dir_from_env("CLAUDE_CONFIG_DIR", home.join(".claude"));
+    let codex = dir_from_env("CODEX_HOME", home.join(".codex"));
+    let xdg_config = dir_from_env("XDG_CONFIG_HOME", home.join(".config"));
+
+    let candidates = [
+        ("Claude Code", claude),
+        ("Codex", codex),
+        ("Cursor", home.join(".cursor")),
+        ("Gemini CLI", home.join(".gemini")),
+        ("OpenCode", xdg_config.join("opencode")),
+        ("GitHub Copilot", home.join(".copilot")),
+        ("Windsurf", home.join(".codeium").join("windsurf")),
+        ("Factory Droid", home.join(".factory")),
+        ("Shared agents", home.join(".agents")),
+    ];
+    candidates
+        .into_iter()
+        .filter(|(_, root)| root.is_dir())
+        .map(|(name, root)| (name, root.join("skills")))
+        .collect()
+}
+
+/// Download the source of release `tag` into `stage_dir` and return its `skills/` directory.
+fn fetch_skills_source(stage_dir: &Path, tag: &str) -> Result<PathBuf> {
+    let url = format!("https://github.com/{GITHUB_REPO}/archive/refs/tags/{tag}.tar.gz");
+    let archive = stage_dir.join("source.tar.gz");
+    download_file(&url, &archive)?;
+
+    let source_dir = stage_dir.join("source");
+    fs::create_dir_all(&source_dir)?;
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&source_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+        .context("running tar to unpack release source")?;
+    if !status.success() {
+        bail!("failed to unpack release source for '{tag}'");
+    }
+
+    fs::read_dir(&source_dir)?
+        .flatten()
+        .map(|entry| entry.path().join("skills"))
+        .find(|path| path.is_dir())
+        .ok_or_else(|| anyhow!("release source for '{tag}' has no skills directory"))
+}
+
+/// Copy every skill in `skills_src` into each agent's skills directory, replacing existing
+/// copies. Returns the names of the agents that received all skills.
+fn install_skills_into(skills_src: &Path, agents: &[(&'static str, PathBuf)]) -> Vec<String> {
+    let skills: Vec<PathBuf> = fs::read_dir(skills_src)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.join("SKILL.md").is_file())
+        .collect();
+    if skills.is_empty() {
+        return Vec::new();
+    }
+
+    agents
+        .iter()
+        .filter(|(_, skills_dir)| {
+            skills
+                .iter()
+                .all(|skill| install_skill(skill, skills_dir).is_ok())
+        })
+        .map(|(name, _)| (*name).to_string())
+        .collect()
+}
+
+fn install_skill(skill: &Path, skills_dir: &Path) -> std::io::Result<()> {
+    let name = skill
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("skill directory has no name"))?;
+    let dest = skills_dir.join(name);
+    fs::create_dir_all(skills_dir)?;
+    match fs::symlink_metadata(&dest) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(&dest)?,
+        // Files and symlinks (e.g. links left by other skill managers) are replaced too.
+        Ok(_) => fs::remove_file(&dest)?,
+        Err(_) => {}
+    }
+    copy_dir_recursive(skill, &dest)
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy the release's agent skills into every detected coding agent without prompting or
+/// printing. Returns the names of the agents that were updated; failures are skipped.
+fn refresh_agent_skills_silently(stage_dir: &Path, tag: &str) -> Vec<String> {
+    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+        return Vec::new();
+    };
+    let agents = detect_agent_skill_dirs(Path::new(&home), |var| std::env::var_os(var));
+    if agents.is_empty() {
+        return Vec::new();
+    }
+    match fetch_skills_source(stage_dir, tag) {
+        Ok(skills_src) => install_skills_into(&skills_src, &agents),
+        Err(_) => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -392,6 +525,66 @@ mod tests {
         assert!(is_newer_version("0.1.0", "v0.1.1"));
         assert!(!is_newer_version("0.2.0", "0.2.0"));
         assert!(!is_newer_version("0.2.0", "0.1.9"));
+    }
+
+    #[test]
+    fn detects_only_existing_agents_and_honors_env_overrides() {
+        let home = tempfile::tempdir().unwrap();
+        let custom_claude = home.path().join("claude-custom");
+        fs::create_dir_all(&custom_claude).unwrap();
+        fs::create_dir_all(home.path().join(".codex")).unwrap();
+        fs::create_dir_all(home.path().join(".claude")).unwrap();
+
+        let claude_env = custom_claude.clone();
+        let agents = detect_agent_skill_dirs(home.path(), move |var| match var {
+            "CLAUDE_CONFIG_DIR" => Some(claude_env.clone().into_os_string()),
+            "CODEX_HOME" => Some(OsString::new()),
+            _ => None,
+        });
+
+        assert_eq!(
+            agents,
+            vec![
+                ("Claude Code", custom_claude.join("skills")),
+                ("Codex", home.path().join(".codex").join("skills")),
+            ]
+        );
+    }
+
+    #[test]
+    fn installs_skills_replacing_existing_copies_and_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("skills");
+        fs::create_dir_all(src.join("dith").join("references")).unwrap();
+        fs::write(src.join("dith").join("SKILL.md"), "new").unwrap();
+        fs::write(src.join("dith").join("references").join("cli.md"), "ref").unwrap();
+        fs::create_dir_all(src.join("not-a-skill")).unwrap();
+
+        let a = root.path().join("a").join("skills");
+        fs::create_dir_all(a.join("dith")).unwrap();
+        fs::write(a.join("dith").join("stale.md"), "old").unwrap();
+
+        let b = root.path().join("b").join("skills");
+        fs::create_dir_all(&b).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("keep.md"), "keep").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, b.join("dith")).unwrap();
+
+        let updated = install_skills_into(&src, &[("A", a.clone()), ("B", b.clone())]);
+
+        assert_eq!(updated, vec!["A".to_string(), "B".to_string()]);
+        for dir in [&a, &b] {
+            assert_eq!(
+                fs::read_to_string(dir.join("dith").join("SKILL.md")).unwrap(),
+                "new"
+            );
+            assert!(dir.join("dith").join("references").join("cli.md").is_file());
+            assert!(!dir.join("dith").join("stale.md").exists());
+            assert!(!dir.join("not-a-skill").exists());
+        }
+        assert!(elsewhere.join("keep.md").is_file());
     }
 
     #[test]
