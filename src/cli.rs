@@ -32,6 +32,7 @@ use crate::preset::{
     list_all_presets, resolve_preset, save_local_preset,
 };
 use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError, build_capabilities, run_pipeline};
+use crate::update::{UpdateOptions, run_update};
 use crate::viewer::{
     FullscreenAnimInput, FullscreenViewerInput, ViewerBackend, run_fullscreen_animation_viewer,
     run_fullscreen_viewer,
@@ -76,9 +77,31 @@ pub enum Command {
     Inspect(InspectArgs),
     /// List available algorithms, palettes, presets, generators, or formats.
     List(ListArgs),
+    /// Update dith to the latest GitHub Release binary (and refresh agent skills).
+    Update(UpdateArgs),
     /// Dump a complete self-describing JSON manifest of all commands, options, ranges, presets, and palettes.
     #[command(alias = "schema")]
     Capabilities,
+}
+
+/// Arguments for `dith update`.
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Check if a newer release is available without modifying the installed binary.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Install a specific release tag (e.g. "v0.2.0") instead of the latest release.
+    #[arg(long, value_name = "TAG")]
+    pub version: Option<String>,
+
+    /// Reinstall even when already running the target release version.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Skip refreshing installed agent skills after updating.
+    #[arg(long)]
+    pub no_skills: bool,
 }
 
 /// Shared recipe flags that compose cleanly: `--recipe` -> `--preset` -> explicit CLI overrides.
@@ -1062,7 +1085,44 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Preset(args) => handle_preset(&args, cli.json),
         Command::Compare(args) => handle_compare(&args, cli.json),
         Command::Batch(args) => handle_batch(&args, cli.json),
+        Command::Update(args) => handle_update(&args, cli.json),
     }
+}
+
+fn handle_update(args: &UpdateArgs, as_json: bool) -> Result<()> {
+    let report = run_update(&UpdateOptions {
+        check_only: args.check,
+        version: args.version.clone(),
+        force: args.force,
+        no_skills: args.no_skills,
+    })?;
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if report.updated {
+        println!(
+            "Updated dith {} -> {} ({}) at {}",
+            report.current_version, report.latest_version, report.target, report.install_path
+        );
+        if report.skills_updated {
+            println!("Refreshed dith agent skill");
+        }
+    } else if report.update_available {
+        println!(
+            "Update available: dith {} -> {} ({})",
+            report.current_version, report.latest_version, report.release_url
+        );
+        println!("Run `dith update` to install.");
+    } else {
+        println!(
+            "dith {} is already up to date (latest: {})",
+            report.current_version, report.latest_version
+        );
+    }
+    Ok(())
 }
 
 fn handle_capabilities() -> Result<()> {

@@ -18,13 +18,21 @@ An agent-friendly Rust CLI toolkit for crafting beautiful dithers, halftones, Ri
   - `--json` global flag — deterministic structured JSON results (dimensions, palette usage histogram, elapsed ms, optional inline Braille preview) and structured JSON errors with `code`, `suggestion`, and `valid_values`.
   - `--dry-run`, `--no-clobber`, `--emit-recipe`, `--recipe <path|->`, stdin/stdout `-`, `inspect`, `compare` contact sheets, and parallel `batch`.
 
-## Install & Build
+## Install & Update
+
+Prebuilt binaries are published for **macOS Apple Silicon (`aarch64-apple-darwin`)** and **Linux Intel (`x86_64-unknown-linux-gnu`)**.
 
 ```bash
-# Install from GitHub
+# Install binary + agent skill (macOS ARM / Linux x86_64)
+curl -fsSL https://raw.githubusercontent.com/lassejlv/dith/main/install.sh | bash
+
+# Update to the latest release anytime
+dith update
+
+# Or install from source
 cargo install --git https://github.com/lassejlv/dith
 
-# Or build locally
+# Local dev build
 mbx build --release
 mbx run -- --help
 ```

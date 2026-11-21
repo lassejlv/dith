@@ -441,6 +441,11 @@ pub fn build_capabilities() -> CapabilitiesManifest {
                 example: "dith list palettes --tag risograph --json",
             },
             CommandCapability {
+                name: "update",
+                summary: "Update dith from GitHub Releases (macOS ARM & Linux x86_64) and silently refresh agent skills.",
+                example: "dith update --check --json",
+            },
+            CommandCapability {
                 name: "capabilities",
                 summary: "Emit this complete JSON discovery manifest of all commands, options, ranges, presets, and palettes.",
                 example: "dith capabilities",

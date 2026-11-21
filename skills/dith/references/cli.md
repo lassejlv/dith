@@ -1,9 +1,16 @@
 # Dith CLI Reference
 
-## Install or Run from Source
+## Install, Update, or Run from Source
 
 ```sh
-# Install from GitHub
+# Install prebuilt binary + agent skill (macOS ARM & Linux x86_64)
+curl -fsSL https://raw.githubusercontent.com/lassejlv/dith/main/install.sh | bash
+
+# Update installed binary (and refresh skill) from GitHub Releases
+dith update
+dith update --check --json
+
+# Or install from source
 cargo install --git https://github.com/lassejlv/dith
 
 # Or run inside the dith source checkout

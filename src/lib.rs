@@ -12,4 +12,5 @@ pub mod palette;
 pub mod preprocess;
 pub mod preset;
 pub mod recipe;
+pub mod update;
 pub mod viewer;
