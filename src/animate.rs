@@ -971,6 +971,17 @@ pub fn encode_apng(frames: &[AnimFrame], loops: u32) -> Result<Vec<u8>> {
     let w = first.image.width();
     let h = first.image.height();
     let num_frames = u32::try_from(frames.len()).context("frame count exceeds u32")?;
+    if let Some((i, frame)) = frames
+        .iter()
+        .enumerate()
+        .find(|(_, f)| f.image.dimensions() != (w, h))
+    {
+        let (fw, fh) = frame.image.dimensions();
+        anyhow::bail!(
+            "cannot encode APNG: frame {} is {fw}x{fh} but frame 1 is {w}x{h}; all frames must share one size",
+            i + 1
+        );
+    }
     let layout = PngLayout::for_images(frames.iter().map(|f| &f.image));
 
     let mut out = Vec::new();
@@ -1268,6 +1279,16 @@ mod tests {
         for (i, (dec, frame)) in decoded.iter().zip(frames).enumerate() {
             assert_eq!(dec, &frame.image, "APNG frame {i} differs after decode");
         }
+    }
+
+    #[test]
+    fn apng_rejects_mixed_frame_sizes() {
+        let frames = [(16, 16), (32, 16)].map(|(w, h)| AnimFrame {
+            image: RgbaImage::new(w, h),
+            delay_ms: 80,
+        });
+        let err = encode_apng(&frames, 0).unwrap_err().to_string();
+        assert!(err.contains("frame 2 is 32x16"), "{err}");
     }
 
     #[test]
