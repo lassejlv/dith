@@ -2,6 +2,10 @@
 
 An agent-friendly Rust CLI toolkit for crafting beautiful dithers, halftones, Risograph prints, retro pixel art, procedural dither graphics, looping animations, vector SVGs, and labeled comparison sheets.
 
+[![Watch the dith intro (55 s)](assets/intro-poster.jpg)](https://api.capy.ai/pr-assets/v_du0_ues8xfb4Lifuj-HtnI_pSsbZZuOiid8moJSMreY.mp4)
+
+[Watch the 55-second intro](https://api.capy.ai/pr-assets/v_du0_ues8xfb4Lifuj-HtnI_pSsbZZuOiid8moJSMreY.mp4). Every image in it is real `dith` output.
+
 ## Highlights
 
 - **Perceptually accurate color engine**: Linear-light error diffusion + Björn Ottosson's **Oklab** perceptual nearest-color matching (with `--color-space oklab|linear|srgb`).
