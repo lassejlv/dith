@@ -7,7 +7,7 @@ These are copy-ready commands for common jobs. Every recipe was run against the 
 ### Hero background with no source image
 
 ```sh
-dith generate mesh -o hero.webp \
+dith generate mesh -o hero.png \
   --preset vapor-mesh --canvas-width 1600 --canvas-height 900 \
   --stops "#0f172a,#3b82f6,#f43f5e,#f8fafc" --seed 7 --json
 ```
