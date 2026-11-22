@@ -71,8 +71,8 @@ Start from a preset, then override individual flags. Explicit flags always win o
 
 The format is inferred from the `-o` extension; pass `--format` to override it.
 
-- **PNG** (default): lossless and pixel-exact. The right choice almost always.
-- **WebP**: compact for the web. **JPEG** destroys dither patterns, so never use it for dithered output unless the user insists.
+- **PNG** (default): lossless and pixel-exact, saved as an indexed PNG at the smallest bit depth the palette allows. The right choice almost always, and usually the smallest file.
+- **WebP**: lossless only, and typically 2–3× larger than dith's PNG for dithered output. **JPEG** destroys dither patterns, so never use it for dithered output unless the user insists.
 - **SVG**: `--svg-shape rect` (run-length merged rectangles, smallest), `circle` (halftone dots), or `dot` (inset dots). `--svg-skip-bg` drops the dominant background color for overlays. SVG grows with pixel count, and circles are much larger than rects, so keep `--max-dim` around 120–320.
 - **Terminal text**: `--format braille|ascii` with `--text-width N`. `-o` is optional and the text goes to stdout.
 - **Stdin/stdout**: pass `-` as input or as `-o -`.
@@ -85,7 +85,7 @@ The format is inferred from the `-o` extension; pass `--format` to override it.
 - several image files as a frame sequence
 - a single static image, which gets film boil (`--temporal boil` is the default for this case)
 
-Output goes to `.gif` (exact palette, smallest), `.apng` (full RGBA), a spritesheet `.png` via `--anim-format spritesheet --sheet-cols N`, or numbered PNG frames via `--frames-dir DIR`.
+Output goes to `.gif` or `.apng` (both exact-palette and delta-encoded; APNG also keeps partial transparency and is often a little smaller), a spritesheet `.png` via `--anim-format spritesheet --sheet-cols N`, or numbered PNG frames via `--frames-dir DIR`.
 
 - **Flicker.** `--temporal locked` (the default) fixes the screen and seed across frames, but it only makes static regions rock-solid with per-pixel algorithms: ordered screens (`bayer*`, `halftone`, line screens), `blue-noise`, `ign`, `random`, and `threshold`. Error diffusion (`floyd-steinberg`, `atkinson`, `stucki`, `riemersma`, ...) passes every change on to neighbouring pixels, so anything that moves makes the stipple shimmer below and to the right of it. Atkinson shimmers least. The `temporally_stable` field of `dith list algorithms --json` says which is which. `boil` gives a hand-drawn shimmer on purpose; set `--boil-rate 2` to animate "on twos". `grain` re-randomizes stipple every frame.
 - **Seamless loops.** Procedural patterns loop by construction. For sweeps, use `--sweep-mode pulse` or `--ping-pong`.
@@ -93,7 +93,7 @@ Output goes to `.gif` (exact palette, smallest), `.apng` (full RGBA), a spritesh
 - **Palette.** One shared global palette is the default and keeps colors steady. Use `--per-frame-palette` only for footage whose colors change a lot.
 - **Timing.** Frames are capped at 2..=240. `--duration S` is an alternative to `--frames` (frames = S × fps); passing both is an error. GIF delays are stored in 10 ms steps, so `--fps 10|20|25|50` gives exact GIF timing (15 fps becomes 70 ms per frame). APNG is exact.
 - **Size.** File size grows with frames × pixels, and dither noise barely compresses.
-  - GIFs are delta-encoded automatically: each frame after the first only stores what changed. Locked per-pixel algorithms with static areas are therefore far smaller than error diffusion or `boil`/`grain`, where nearly every pixel changes each frame.
+  - GIFs and APNGs are delta-encoded automatically: each frame after the first only stores what changed. Locked per-pixel algorithms with static areas are therefore far smaller than error diffusion or `boil`/`grain`, where nearly every pixel changes each frame.
   - To hit a budget, pass `--max-size 2MB` (also `500KB`, `1.5MiB`, or bytes). Dith shrinks the frame dimensions, keeping frame count and fps, until the file fits, and reports `size_fit_scale` (1.0 = untouched). If `size_fit_scale` comes back small (under about 0.5), the result may be too small to use. Lower the size another way instead: fewer frames, a locked ordered algorithm, or fewer palette colors.
   - Keep procedural canvases modest (defaults are 480×360).
 - **Procedural colors.** Without `--stops`, patterns use a plain near-black → near-white ramp. Pass `--stops` to choose the source tones deliberately; it usually looks better, especially with a colored palette.

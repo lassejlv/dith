@@ -23,7 +23,7 @@ use thiserror::Error;
 use crate::color::Rgb;
 use crate::dither::dither_image;
 use crate::generate::{GenerateOptions, generate_pattern};
-use crate::output::{ColorUsage, color_histogram, encode_png_bytes, write_output_file};
+use crate::output::{ColorUsage, PngLayout, color_histogram, encode_png_bytes, write_output_file};
 use crate::palette::{Palette, extract_adaptive_palette, extract_adaptive_palette_from_frames};
 use crate::preprocess::{finalize_image, prepare_image};
 use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError};
@@ -293,7 +293,7 @@ pub enum AnimFormat {
     /// Lossless exact-palette looping GIF (direct global color table, tiny file size).
     #[default]
     Gif,
-    /// Lossless full-color Animated PNG (32-bit RGBA + alpha, crisp web playback).
+    /// Lossless Animated PNG (indexed palette, delta-encoded frames, alpha, crisp web playback).
     Apng,
     /// Single packed PNG sprite sheet (for CSS `steps()` or game engines).
     Spritesheet,
@@ -957,7 +957,10 @@ fn delta_frame(prev: &[u8], cur: &[u8], w: u16, unchanged_idx: Option<u8>) -> gi
     gf
 }
 
-/// Encode dithered animation frames as a lossless 32-bit RGBA Animated PNG (`loops == 0` -> infinite).
+/// Encode dithered animation frames as a lossless Animated PNG (`loops == 0` -> infinite).
+///
+/// All frames share one compact [`PngLayout`] (an indexed palette for dithered output), and every
+/// frame after the first only stores the bounding box of pixels that changed since the previous one.
 ///
 /// # Errors
 /// Returns an error if frames are empty or PNG encoding fails.
@@ -968,36 +971,75 @@ pub fn encode_apng(frames: &[AnimFrame], loops: u32) -> Result<Vec<u8>> {
     let w = first.image.width();
     let h = first.image.height();
     let num_frames = u32::try_from(frames.len()).context("frame count exceeds u32")?;
+    if let Some((i, frame)) = frames
+        .iter()
+        .enumerate()
+        .find(|(_, f)| f.image.dimensions() != (w, h))
+    {
+        let (fw, fh) = frame.image.dimensions();
+        anyhow::bail!(
+            "cannot encode APNG: frame {} is {fw}x{fh} but frame 1 is {w}x{h}; all frames must share one size",
+            i + 1
+        );
+    }
+    let layout = PngLayout::for_images(frames.iter().map(|f| &f.image));
 
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, w, h);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
+        layout.configure(&mut encoder, png::Compression::High);
         encoder
             .set_animated(num_frames, loops)
             .context("configuring APNG animation header")?;
         encoder
-            .set_dispose_op(png::DisposeOp::Background)
+            .set_dispose_op(png::DisposeOp::None)
             .context("setting APNG dispose op")?;
         encoder
             .set_blend_op(png::BlendOp::Source)
             .context("setting APNG blend op")?;
 
         let mut writer = encoder.write_header().context("writing APNG header")?;
+        let mut prev: Option<&RgbaImage> = None;
         for frame in frames {
             let delay_ms =
                 u16::try_from(frame.delay_ms.clamp(10, u32::from(u16::MAX))).unwrap_or(u16::MAX);
             writer
                 .set_frame_delay(delay_ms, 1000)
                 .context("setting APNG frame delay")?;
+            let (x, y, rw, rh) = prev.map_or((0, 0, w, h), |p| changed_region(p, &frame.image));
             writer
-                .write_image_data(frame.image.as_raw())
+                .reset_frame_position()
+                .and_then(|()| writer.set_frame_dimension(rw, rh))
+                .and_then(|()| writer.set_frame_position(x, y))
+                .context("setting APNG frame region")?;
+            let region = image::imageops::crop_imm(&frame.image, x, y, rw, rh).to_image();
+            writer
+                .write_image_data(&layout.pixel_data(&region))
                 .context("writing APNG frame pixels")?;
+            prev = Some(&frame.image);
         }
         writer.finish().context("finalizing APNG stream")?;
     }
     Ok(out)
+}
+
+/// Bounding box `(x, y, width, height)` of pixels that differ between two equally sized frames
+/// (a single pixel at the origin when they are identical, since APNG frames cannot be empty).
+fn changed_region(prev: &RgbaImage, cur: &RgbaImage) -> (u32, u32, u32, u32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    for (x, y, px) in cur.enumerate_pixels() {
+        if prev.get_pixel(x, y) != px {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    if x0 == u32::MAX {
+        (0, 0, 1, 1)
+    } else {
+        (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+    }
 }
 
 /// Pack animation frames into a crisp PNG sprite sheet `(image, columns, rows)`.
@@ -1220,7 +1262,56 @@ mod tests {
             };
             let anim = dither_animation_frames(&raw, &recipe, &anim_opts).unwrap();
             assert_gif_roundtrips_exactly(&anim.frames, &anim.palette);
+            assert_apng_roundtrips_exactly(&anim.frames);
         }
+    }
+
+    fn assert_apng_roundtrips_exactly(frames: &[AnimFrame]) {
+        let bytes = encode_apng(frames, 0).unwrap();
+        let decoded: Vec<RgbaImage> = PngDecoder::new(std::io::Cursor::new(bytes))
+            .unwrap()
+            .apng()
+            .unwrap()
+            .into_frames()
+            .map(|f| f.unwrap().into_buffer())
+            .collect();
+        assert_eq!(decoded.len(), frames.len());
+        for (i, (dec, frame)) in decoded.iter().zip(frames).enumerate() {
+            assert_eq!(dec, &frame.image, "APNG frame {i} differs after decode");
+        }
+    }
+
+    #[test]
+    fn apng_rejects_mixed_frame_sizes() {
+        let frames = [(16, 16), (32, 16)].map(|(w, h)| AnimFrame {
+            image: RgbaImage::new(w, h),
+            delay_ms: 80,
+        });
+        let err = encode_apng(&frames, 0).unwrap_err().to_string();
+        assert!(err.contains("frame 2 is 32x16"), "{err}");
+    }
+
+    #[test]
+    fn delta_encoded_apng_with_transparency_decodes_to_identical_frames() {
+        let clear = Rgba([0, 0, 0, 0]);
+        let ink = Rgba([20, 30, 140, 255]);
+        let wash = Rgba([200, 40, 40, 128]);
+        let frames: Vec<AnimFrame> = (0..5u32)
+            .map(|i| {
+                let mut image = RgbaImage::from_pixel(20, 12, clear);
+                for y in 2..6 {
+                    for x in i.min(3) * 3..i.min(3) * 3 + 4 {
+                        image.put_pixel(x, y, ink);
+                    }
+                }
+                image.put_pixel(19, 11, wash);
+                AnimFrame {
+                    image,
+                    delay_ms: 80,
+                }
+            })
+            .collect();
+        assert_apng_roundtrips_exactly(&frames);
     }
 
     #[test]

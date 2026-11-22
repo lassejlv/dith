@@ -1,6 +1,6 @@
 //! Image export (PNG/WebP/JPEG/GIF/BMP/TIFF, vector SVG, Kitty graphics, Braille, ASCII) and stats.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Cursor, IsTerminal};
@@ -23,7 +23,7 @@ pub enum OutputFormat {
     /// Lossless PNG (recommended for crisp pixel-exact dithers).
     #[default]
     Png,
-    /// Lossless/lossy WebP.
+    /// Lossless WebP.
     Webp,
     /// JPEG (flattens alpha).
     Jpeg,
@@ -223,8 +223,8 @@ pub fn encode_image(
         }
         OutputFormat::Braille => Ok(render_braille(img, export.text_width).into_bytes()),
         OutputFormat::Ascii => Ok(render_ascii(img, export.text_width).into_bytes()),
-        OutputFormat::Png
-        | OutputFormat::Webp
+        OutputFormat::Png => encode_png_bytes(img),
+        OutputFormat::Webp
         | OutputFormat::Jpeg
         | OutputFormat::Gif
         | OutputFormat::Bmp
@@ -235,17 +235,17 @@ pub fn encode_image(
                 DynamicImage::ImageRgba8(img.clone())
             };
             let img_fmt = match format {
-                OutputFormat::Png => ImageFormat::Png,
                 OutputFormat::Webp => ImageFormat::WebP,
                 OutputFormat::Jpeg => ImageFormat::Jpeg,
                 OutputFormat::Gif => ImageFormat::Gif,
                 OutputFormat::Bmp => ImageFormat::Bmp,
                 OutputFormat::Tiff => ImageFormat::Tiff,
-                OutputFormat::Svg
+                OutputFormat::Png
+                | OutputFormat::Svg
                 | OutputFormat::Kitty
                 | OutputFormat::Braille
                 | OutputFormat::Ascii => {
-                    unreachable!("text/terminal formats handled above")
+                    unreachable!("PNG and text/terminal formats handled above")
                 }
             };
             let mut cursor = Cursor::new(Vec::new());
@@ -273,8 +273,8 @@ pub fn write_output_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Render a dithered image as a compact, crisp SVG.
 ///
-/// Uses horizontal run-length merging in `Rect` mode and groups elements by color `<g fill="...">`
-/// so output files stay lean and clean for web and design tooling.
+/// `Rect` mode merges horizontal runs into one compact `<path>` per color; dot modes group
+/// `<circle>` elements by color `<g fill="...">`, so files stay lean for web and design tooling.
 #[must_use]
 pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
     let w = img.width();
@@ -317,56 +317,49 @@ pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
         && !skip_bg
     {
         let hex = Rgb::new(bg[0], bg[1], bg[2]).to_hex();
-        let _ = writeln!(out, "  <rect width=\"{w}\" height=\"{h}\" fill=\"{hex}\"/>");
+        let _ = writeln!(out, "<rect width=\"{w}\" height=\"{h}\" fill=\"{hex}\"/>");
     }
-
-    // Group geometry by hex color for clean, compact SVG markup.
-    let mut color_groups: BTreeMap<[u8; 3], String> = BTreeMap::new();
 
     match shape {
         SvgShape::Rect => {
+            let mut paths: BTreeMap<[u8; 4], (String, u32, u32)> = BTreeMap::new();
             for y in 0..h {
                 let mut x = 0u32;
                 while x < w {
                     let px = *img.get_pixel(x, y);
-                    let rgb = [px[0], px[1], px[2]];
-                    if px[3] == 0 || bg_color == Some(rgb) {
+                    if px[3] == 0 || bg_color == Some([px[0], px[1], px[2]]) {
                         x += 1;
                         continue;
                     }
                     let start_x = x;
                     x += 1;
-                    while x < w {
-                        let next = *img.get_pixel(x, y);
-                        if next[3] == px[3] && [next[0], next[1], next[2]] == rgb {
-                            x += 1;
-                        } else {
-                            break;
-                        }
+                    while x < w && *img.get_pixel(x, y) == px {
+                        x += 1;
                     }
                     let run_w = x - start_x;
-                    let entry = color_groups.entry(rgb).or_default();
-                    if px[3] < 255 {
-                        let op = f32::from(px[3]) / 255.0;
-                        let _ = writeln!(
-                            entry,
-                            "    <rect x=\"{start_x}\" y=\"{y}\" width=\"{run_w}\" height=\"1\" fill-opacity=\"{op:.2}\"/>"
-                        );
-                    } else {
-                        let _ = writeln!(
-                            entry,
-                            "    <rect x=\"{start_x}\" y=\"{y}\" width=\"{run_w}\" height=\"1\"/>"
-                        );
-                    }
+                    let (d, last_x, last_y) = paths.entry(px.0).or_default();
+                    let dx = i64::from(start_x) - i64::from(*last_x);
+                    let dy = y - *last_y;
+                    let _ = write!(d, "m{dx} {dy}h{run_w}v1h-{run_w}z");
+                    (*last_x, *last_y) = (start_x, y);
                 }
+            }
+            for (rgba, (d, _, _)) in paths {
+                let hex = Rgb::new(rgba[0], rgba[1], rgba[2]).to_hex();
+                let _ = write!(out, "<path fill=\"{hex}\"");
+                if rgba[3] < 255 {
+                    let _ = write!(out, " fill-opacity=\"{:.2}\"", f32::from(rgba[3]) / 255.0);
+                }
+                let _ = writeln!(out, " d=\"{d}\"/>");
             }
         }
         SvgShape::Circle | SvgShape::Dot => {
             let radius = if shape == SvgShape::Circle {
-                "0.48"
+                ".48"
             } else {
-                "0.38"
+                ".38"
             };
+            let mut color_groups: BTreeMap<[u8; 3], String> = BTreeMap::new();
             for y in 0..h {
                 for x in 0..w {
                     let px = *img.get_pixel(x, y);
@@ -374,23 +367,15 @@ pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
                     if px[3] == 0 || bg_color == Some(rgb) {
                         continue;
                     }
-                    let cx = x as f32 + 0.5;
-                    let cy = y as f32 + 0.5;
                     let entry = color_groups.entry(rgb).or_default();
-                    let _ = writeln!(
-                        entry,
-                        "    <circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{radius}\"/>"
-                    );
+                    let _ = write!(entry, "<circle cx=\"{x}.5\" cy=\"{y}.5\" r=\"{radius}\"/>");
                 }
             }
+            for (rgb, body) in color_groups {
+                let hex = Rgb::new(rgb[0], rgb[1], rgb[2]).to_hex();
+                let _ = writeln!(out, "<g fill=\"{hex}\">{body}</g>");
+            }
         }
-    }
-
-    for (rgb, body) in color_groups {
-        let hex = Rgb::new(rgb[0], rgb[1], rgb[2]).to_hex();
-        let _ = writeln!(out, "  <g fill=\"{hex}\">");
-        out.push_str(&body);
-        out.push_str("  </g>\n");
     }
 
     out.push_str("</svg>\n");
@@ -563,83 +548,160 @@ pub fn encode_kitty_png(png_bytes: &[u8], opts: KittyOptions) -> String {
     out
 }
 
-/// Encode an `RgbaImage` directly into lossless PNG bytes (balanced compression for saved files).
+/// Encode an `RgbaImage` as the smallest lossless PNG layout that holds it exactly (for saved files).
+///
+/// See [`PngLayout`] for how the layout is chosen.
 ///
 /// # Errors
 /// Returns an error if PNG encoding fails.
 pub fn encode_png_bytes(img: &RgbaImage) -> Result<Vec<u8>> {
-    let mut png_bytes = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(img.clone())
-        .write_to(&mut png_bytes, ImageFormat::Png)
-        .context("encoding PNG bytes")?;
-    Ok(png_bytes.into_inner())
+    encode_png(img, png::Compression::High)
 }
 
-/// Ultra-fast lossless PNG encoding tailored for live interactive Kitty graphics previews.
+/// Fast lossless PNG encoding tailored for live interactive Kitty graphics previews.
 ///
-/// Automatically uses 8-bit indexed PNG (4x fewer bytes to compress and ~3x smaller Kitty
-/// Base64 payload!) whenever the image uses <= 16 opaque palette colors, and falls back to
-/// fast `Compression::Fast` + `Filter::NoFilter` RGBA for continuous-tone / translucent frames.
+/// Uses the same compact layout as [`encode_png_bytes`] with much cheaper DEFLATE settings.
 ///
 /// # Errors
 /// Returns an error if PNG encoding fails.
 pub fn encode_fast_png_bytes(img: &RgbaImage) -> Result<Vec<u8>> {
-    let pixel_count = (img.width() as usize) * (img.height() as usize);
-    let (pixels, _) = img.as_raw().as_chunks::<4>();
+    encode_png(img, png::Compression::Fast)
+}
 
-    // Fast probe: if <= 16 unique opaque colors (99% of dithered frames), encode indexed PNG.
-    let mut palette: Vec<[u8; 3]> = Vec::with_capacity(16);
-    let mut indices: Vec<u8> = Vec::with_capacity(pixel_count);
-    let mut can_index = true;
-    for &px in pixels {
-        if px[3] != 255 {
-            can_index = false;
-            break;
-        }
-        let rgb = [px[0], px[1], px[2]];
-        if let Some(pos) = palette.iter().position(|&c| c == rgb) {
-            indices.push(pos as u8);
-        } else if palette.len() < 16 {
-            indices.push(palette.len() as u8);
-            palette.push(rgb);
-        } else {
-            can_index = false;
-            break;
-        }
-    }
-
-    let mut out = Vec::with_capacity(if can_index {
-        pixel_count / 4 + 256
-    } else {
-        pixel_count / 2 + 256
-    });
+fn encode_png(img: &RgbaImage, compression: png::Compression) -> Result<Vec<u8>> {
+    let layout = PngLayout::for_images([img]);
+    let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, img.width(), img.height());
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        encoder.set_filter(png::Filter::NoFilter);
-        if can_index && !palette.is_empty() {
-            encoder.set_color(png::ColorType::Indexed);
-            let mut flat_pal = Vec::with_capacity(palette.len() * 3);
-            for rgb in &palette {
-                flat_pal.extend_from_slice(rgb);
-            }
-            encoder.set_palette(flat_pal);
-            let mut writer = encoder
-                .write_header()
-                .context("writing fast indexed PNG header")?;
-            writer
-                .write_image_data(&indices)
-                .context("writing fast indexed PNG pixel data")?;
-        } else {
-            encoder.set_color(png::ColorType::Rgba);
-            let mut writer = encoder.write_header().context("writing fast PNG header")?;
-            writer
-                .write_image_data(img.as_raw())
-                .context("writing fast PNG pixel data")?;
-        }
+        layout.configure(&mut encoder, compression);
+        let mut writer = encoder.write_header().context("writing PNG header")?;
+        writer
+            .write_image_data(&layout.pixel_data(img))
+            .context("writing PNG pixel data")?;
     }
     Ok(out)
+}
+
+/// The most compact exact PNG pixel layout for a set of images (one still, or every animation frame).
+///
+/// Dithered output almost always uses a handful of colors, so it becomes an indexed PNG at the
+/// smallest bit depth that fits the palette (1, 2, 4, or 8 bits per pixel) with a `tRNS` chunk for
+/// any translucent entries. Images with more than 256 distinct colors fall back to 24-bit RGB when
+/// fully opaque, else 32-bit RGBA.
+#[derive(Debug)]
+pub(crate) enum PngLayout {
+    Indexed(Vec<[u8; 4]>),
+    Rgb,
+    Rgba,
+}
+
+impl PngLayout {
+    pub(crate) fn for_images<'a>(images: impl IntoIterator<Item = &'a RgbaImage>) -> Self {
+        let mut palette: Vec<[u8; 4]> = Vec::new();
+        let mut seen: HashSet<[u8; 4]> = HashSet::new();
+        let mut opaque = true;
+        let mut indexable = true;
+        for img in images {
+            let (pixels, _) = img.as_raw().as_chunks::<4>();
+            for &px in pixels {
+                opaque &= px[3] == 255;
+                if indexable && seen.insert(px) {
+                    indexable = palette.len() < 256;
+                    palette.push(px);
+                }
+            }
+        }
+        if indexable && !palette.is_empty() {
+            palette.sort_by_key(|px| px[3] == 255);
+            Self::Indexed(palette)
+        } else if opaque {
+            Self::Rgb
+        } else {
+            Self::Rgba
+        }
+    }
+
+    fn bit_depth(&self) -> u8 {
+        match self {
+            Self::Indexed(palette) => match palette.len() {
+                0..=2 => 1,
+                3..=4 => 2,
+                5..=16 => 4,
+                _ => 8,
+            },
+            Self::Rgb | Self::Rgba => 8,
+        }
+    }
+
+    pub(crate) fn configure<W: std::io::Write>(
+        &self,
+        encoder: &mut png::Encoder<'_, W>,
+        compression: png::Compression,
+    ) {
+        encoder.set_compression(compression);
+        match self {
+            Self::Indexed(palette) => {
+                encoder.set_color(png::ColorType::Indexed);
+                encoder.set_depth(match self.bit_depth() {
+                    1 => png::BitDepth::One,
+                    2 => png::BitDepth::Two,
+                    4 => png::BitDepth::Four,
+                    _ => png::BitDepth::Eight,
+                });
+                encoder.set_palette(
+                    palette
+                        .iter()
+                        .flat_map(|c| [c[0], c[1], c[2]])
+                        .collect::<Vec<_>>(),
+                );
+                let trns: Vec<u8> = palette
+                    .iter()
+                    .map(|c| c[3])
+                    .take_while(|&a| a < 255)
+                    .collect();
+                if !trns.is_empty() {
+                    encoder.set_trns(trns);
+                }
+                encoder.set_filter(png::Filter::NoFilter);
+            }
+            Self::Rgb => {
+                encoder.set_color(png::ColorType::Rgb);
+                encoder.set_depth(png::BitDepth::Eight);
+            }
+            Self::Rgba => {
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+            }
+        }
+    }
+
+    /// Raw PNG scanline data (before filtering) for `img`, whose colors must be covered by this layout.
+    pub(crate) fn pixel_data(&self, img: &RgbaImage) -> Vec<u8> {
+        let (pixels, _) = img.as_raw().as_chunks::<4>();
+        match self {
+            Self::Indexed(palette) => {
+                let lookup: HashMap<[u8; 4], u8> = palette
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &c)| (c, i as u8))
+                    .collect();
+                let depth = usize::from(self.bit_depth());
+                let per_byte = 8 / depth;
+                let width = img.width() as usize;
+                let row_bytes = width.div_ceil(per_byte);
+                let mut out = vec![0u8; row_bytes * img.height() as usize];
+                for (row, out_row) in pixels.chunks(width.max(1)).zip(out.chunks_mut(row_bytes)) {
+                    for (x, px) in row.iter().enumerate() {
+                        let shift = 8 - depth * (x % per_byte + 1);
+                        out_row[x / per_byte] |= lookup[px] << shift;
+                    }
+                }
+                out
+            }
+            Self::Rgb => pixels.iter().flat_map(|px| [px[0], px[1], px[2]]).collect(),
+            Self::Rgba => img.as_raw().clone(),
+        }
+    }
 }
 
 /// Standard RFC 4648 Base64 encoder (zero extra dependencies).
@@ -751,10 +813,7 @@ mod tests {
             img.put_pixel(x, 0, Rgba([0, 0, 0, 255]));
         }
         let svg = render_svg(&img, SvgShape::Rect, false);
-        assert!(
-            svg.contains("width=\"4\" height=\"1\""),
-            "expected RLE rect: {svg}"
-        );
+        assert!(svg.contains("m2 0h4v1h-4z"), "expected RLE run: {svg}");
         assert!(svg.contains("fill=\"#000000\""));
     }
 
@@ -777,6 +836,37 @@ mod tests {
         let rgba_bytes = encode_fast_png_bytes(&translucent).unwrap();
         let decoded_rgba = image::load_from_memory(&rgba_bytes).unwrap().to_rgba8();
         assert_eq!(decoded_rgba, translucent);
+    }
+
+    #[test]
+    fn saved_png_uses_smallest_exact_layout() {
+        let decode = |img: &RgbaImage| {
+            let bytes = encode_png_bytes(img).unwrap();
+            let reader = png::Decoder::new(Cursor::new(bytes.clone()))
+                .read_info()
+                .unwrap();
+            let info = reader.info();
+            let layout = (info.color_type, info.bit_depth, info.trns.is_some());
+            (layout, image::load_from_memory(&bytes).unwrap().to_rgba8())
+        };
+
+        let mut two_tone = RgbaImage::from_pixel(13, 5, Rgba([244, 240, 228, 255]));
+        two_tone.put_pixel(12, 4, Rgba([26, 43, 140, 255]));
+        let (layout, decoded) = decode(&two_tone);
+        assert_eq!(layout, (png::ColorType::Indexed, png::BitDepth::One, false));
+        assert_eq!(decoded, two_tone);
+
+        let mut cutout = two_tone.clone();
+        cutout.put_pixel(0, 0, Rgba([0, 0, 0, 0]));
+        cutout.put_pixel(1, 0, Rgba([9, 9, 9, 100]));
+        let (layout, decoded) = decode(&cutout);
+        assert_eq!(layout, (png::ColorType::Indexed, png::BitDepth::Two, true));
+        assert_eq!(decoded, cutout);
+
+        let photo = RgbaImage::from_fn(32, 32, |x, y| Rgba([(x * 8) as u8, (y * 8) as u8, 7, 255]));
+        let (layout, decoded) = decode(&photo);
+        assert_eq!(layout, (png::ColorType::Rgb, png::BitDepth::Eight, false));
+        assert_eq!(decoded, photo);
     }
 
     #[test]
