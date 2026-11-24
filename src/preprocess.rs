@@ -478,43 +478,56 @@ fn apply_tonal_adjustments(img: &mut RgbaImage, opts: &PreprocessOptions) {
         opts.saturation.clamp(0.0, 3.0)
     };
 
-    for px in img.pixels_mut() {
-        let mut r = f32::from(px[0]) / 255.0;
-        let mut g = f32::from(px[1]) / 255.0;
-        let mut b = f32::from(px[2]) / 255.0;
-
-        // Brightness + contrast around 0.5 midpoint.
-        r = ((r - 0.5) * contrast_factor + 0.5 + brightness).clamp(0.0, 1.0);
-        g = ((g - 0.5) * contrast_factor + 0.5 + brightness).clamp(0.0, 1.0);
-        b = ((b - 0.5) * contrast_factor + 0.5 + brightness).clamp(0.0, 1.0);
-
-        // Gamma.
-        if (gamma - 1.0).abs() > 1e-4 {
-            r = r.powf(gamma);
-            g = g.powf(gamma);
-            b = b.powf(gamma);
-        }
-
-        // Saturation / grayscale in linear light.
-        if (sat - 1.0).abs() > 1e-4 {
-            let lr = crate::color::srgb_f32_to_linear(r);
-            let lg = crate::color::srgb_f32_to_linear(g);
-            let lb = crate::color::srgb_f32_to_linear(b);
-            let y = 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
-            r = crate::color::linear_to_srgb_f32(y + (lr - y) * sat);
-            g = crate::color::linear_to_srgb_f32(y + (lg - y) * sat);
-            b = crate::color::linear_to_srgb_f32(y + (lb - y) * sat);
-        }
-
+    let gamma_on = (gamma - 1.0).abs() > 1e-4;
+    let quantize = |mut v: f32| {
         if opts.invert {
-            r = 1.0 - r;
-            g = 1.0 - g;
-            b = 1.0 - b;
+            v = 1.0 - v;
         }
+        (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    };
 
-        px[0] = (r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        px[1] = (g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        px[2] = (b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    // Brightness, contrast (around the 0.5 midpoint) and gamma act on each channel alone, so
+    // they are evaluated once per possible 8-bit value instead of once per pixel.
+    let channel: [f32; 256] = std::array::from_fn(|v| {
+        let x = f32::from(v as u8) / 255.0;
+        let x = ((x - 0.5) * contrast_factor + 0.5 + brightness).clamp(0.0, 1.0);
+        if gamma_on { x.powf(gamma) } else { x }
+    });
+
+    if (sat - 1.0).abs() <= 1e-4 {
+        let lut: [u8; 256] = std::array::from_fn(|v| quantize(channel[v]));
+        for px in img.pixels_mut() {
+            px[0] = lut[usize::from(px[0])];
+            px[1] = lut[usize::from(px[1])];
+            px[2] = lut[usize::from(px[2])];
+        }
+        return;
+    }
+
+    // Saturation / grayscale mixes channels in linear light, so results are cached per input
+    // color in a direct-mapped table (photos and gradients repeat colors heavily).
+    let linear: [f32; 256] = std::array::from_fn(|v| crate::color::srgb_f32_to_linear(channel[v]));
+    let mut cache = vec![(u32::MAX, [0u8; 3]); 1 << 16];
+    for px in img.pixels_mut() {
+        let key = u32::from(px[0]) << 16 | u32::from(px[1]) << 8 | u32::from(px[2]);
+        let slot = &mut cache[(key.wrapping_mul(0x9E37_79B1) >> 16) as usize];
+        if slot.0 != key {
+            let lr = linear[usize::from(px[0])];
+            let lg = linear[usize::from(px[1])];
+            let lb = linear[usize::from(px[2])];
+            let y = 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
+            *slot = (
+                key,
+                [
+                    quantize(crate::color::linear_to_srgb_f32(y + (lr - y) * sat)),
+                    quantize(crate::color::linear_to_srgb_f32(y + (lg - y) * sat)),
+                    quantize(crate::color::linear_to_srgb_f32(y + (lb - y) * sat)),
+                ],
+            );
+        }
+        px[0] = slot.1[0];
+        px[1] = slot.1[1];
+        px[2] = slot.1[2];
     }
 }
 
@@ -567,5 +580,73 @@ mod tests {
         assert_eq!(prep.working.dimensions(), (16, 12));
         let out = finalize_image(prep.working.clone(), &prep, &opts);
         assert_eq!(out.dimensions(), (64, 48));
+    }
+
+    /// The per-pixel formula the tabulated [`apply_tonal_adjustments`] must reproduce exactly.
+    fn tonal_reference(px: [u8; 3], opts: &PreprocessOptions) -> [u8; 3] {
+        let c = opts.contrast.clamp(-1.0, 1.0);
+        let contrast_factor = if c >= 0.0 {
+            1.0 + c * 2.5
+        } else {
+            1.0 / (1.0 - c * 2.5)
+        };
+        let brightness = opts.brightness.clamp(-1.0, 1.0);
+        let gamma = opts.gamma.clamp(0.1, 5.0);
+        let sat = if opts.grayscale {
+            0.0
+        } else {
+            opts.saturation.clamp(0.0, 3.0)
+        };
+        let mut v = px.map(|x| {
+            let x = f32::from(x) / 255.0;
+            let x = ((x - 0.5) * contrast_factor + 0.5 + brightness).clamp(0.0, 1.0);
+            if (gamma - 1.0).abs() > 1e-4 {
+                x.powf(gamma)
+            } else {
+                x
+            }
+        });
+        if (sat - 1.0).abs() > 1e-4 {
+            let l = v.map(crate::color::srgb_f32_to_linear);
+            let y = 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2];
+            v = l.map(|x| crate::color::linear_to_srgb_f32(y + (x - y) * sat));
+        }
+        v.map(|x| {
+            let x = if opts.invert { 1.0 - x } else { x };
+            (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+        })
+    }
+
+    #[test]
+    fn tabulated_tonal_adjustments_match_the_per_pixel_formula() {
+        let mut img = RgbaImage::new(64, 64);
+        for (i, px) in img.pixels_mut().enumerate() {
+            let i = i as u32;
+            *px = Rgba([(i * 7) as u8, (i * 13 + 5) as u8, (i * 29 + 11) as u8, 255]);
+        }
+        let cases = [
+            (0.1, 0.0, 1.0, 1.0, false, false),
+            (-0.3, 0.1, 1.0, 2.2, false, false),
+            (0.0, 0.0, 1.3, 0.4, false, true),
+            (0.4, -0.2, 0.6, 1.0, true, true),
+            (0.0, 0.0, 2.5, 1.0, true, false),
+        ];
+        for (contrast, brightness, gamma, saturation, grayscale, invert) in cases {
+            let opts = PreprocessOptions {
+                brightness,
+                contrast,
+                gamma,
+                saturation,
+                grayscale,
+                invert,
+                ..Default::default()
+            };
+            let mut out = img.clone();
+            apply_tonal_adjustments(&mut out, &opts);
+            for (src, got) in img.pixels().zip(out.pixels()) {
+                let want = tonal_reference([src[0], src[1], src[2]], &opts);
+                assert_eq!([got[0], got[1], got[2]], want, "{opts:?} at {src:?}");
+            }
+        }
     }
 }

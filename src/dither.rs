@@ -4,11 +4,11 @@ use std::sync::{LazyLock, OnceLock};
 
 use clap::ValueEnum;
 use image::{Rgba, RgbaImage};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::{ColorSpace, LinearRgb, Rgb, srgb_u8_to_linear};
 use crate::palette::{Palette, SplitMix64};
+use crate::par::prelude::*;
 
 /// All supported dithering algorithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]

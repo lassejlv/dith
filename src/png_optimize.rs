@@ -10,7 +10,8 @@ use anyhow::{Context, Result, bail, ensure};
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::{Compress, Crc, FlushCompress};
-use rayon::prelude::*;
+
+use crate::par::prelude::*;
 
 const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 

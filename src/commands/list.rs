@@ -7,7 +7,7 @@ use crate::dither::Algorithm;
 use crate::generate::Pattern;
 use crate::palette::list_builtin_palettes;
 use crate::preset::list_all_presets;
-use crate::recipe::build_capabilities;
+use crate::recipe::{build_capabilities, paper_sizes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ListKind {
@@ -16,6 +16,8 @@ pub enum ListKind {
     Presets,
     Generators,
     Formats,
+    Papers,
+    AnimFormats,
 }
 
 #[derive(Debug, Args)]
@@ -130,11 +132,36 @@ pub(crate) fn handle_list(args: &ListArgs, as_json: bool) -> Result<()> {
         }
         ListKind::Formats => {
             let caps = build_capabilities();
+            let formats: Vec<_> = caps
+                .output_formats
+                .into_iter()
+                .chain(caps.plot_formats)
+                .collect();
             if as_json {
-                println!("{}", serde_json::to_string_pretty(&caps.output_formats)?);
+                println!("{}", serde_json::to_string_pretty(&formats)?);
             } else {
-                for f in caps.output_formats {
+                for f in formats {
                     println!("{:<10} {}", f.id, f.description);
+                }
+            }
+        }
+        ListKind::Papers => {
+            let items = paper_sizes();
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            } else {
+                for p in items {
+                    println!("{:<10} {} x {} mm", p.id, p.width_mm, p.height_mm);
+                }
+            }
+        }
+        ListKind::AnimFormats => {
+            let caps = build_capabilities();
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&caps.animation_formats)?);
+            } else {
+                for f in caps.animation_formats {
+                    println!("{:<12} {}", f.id, f.description);
                 }
             }
         }
