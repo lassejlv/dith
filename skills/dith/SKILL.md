@@ -3,7 +3,7 @@ name: dith
 description: >-
   Craft deterministic dithered images, vector SVGs, procedural art, and looping animations with the dith CLI.
   Use when an agent needs to dither photos, logos, or other assets; generate procedural dither graphics (hero backgrounds, orbs, mesh gradients, textures) with no input image;
-  animate GIFs, APNGs, spritesheets, film-boil loops, dissolves, or palette cycling; make 1-bit, Risograph, halftone, Game Boy, PICO-8, CRT, or other retro/print looks;
+  animate GIFs, APNGs, animated WebPs, spritesheets, film-boil loops, dissolves, or palette cycling; make 1-bit, Risograph, halftone, Game Boy, PICO-8, CRT, or other retro/print looks;
   apply exact brand palettes; build algorithm/preset/palette comparison contact sheets; save reusable local presets or replayable JSON recipes;
   render Braille/ASCII/Kitty terminal previews; batch-dither many files; or stipple photos and generators for pen plotters
   (weighted Voronoi stippling with an optimised pen path, exported as physical-size mm SVG or G-code).
@@ -19,7 +19,7 @@ description: >-
    - Inside the dith source checkout without a global install, run it via `cargo run --release -- <args>` (or `mbx run -- <args>` when `mbx` is available).
    - If dith is missing, tell the user and offer an install command from [references/cli.md](references/cli.md#install-update-or-run-from-source). Wait for their approval before installing anything.
 2. Do not rely on memorized catalogs when the exact set matters. Ask the binary:
-   - `dith list presets|algorithms|palettes|generators|formats|papers --json`, filterable with `--tag <substr>` or `--category <name>`
+   - `dith list presets|algorithms|palettes|generators|formats|anim-formats|papers --json`, filterable with `--tag <substr>` or `--category <name>`
    - `dith capabilities` for the full manifest of commands, parameter ranges, and the default recipe (about 40 KB, so prefer `list` when one catalog is enough)
 
 ## Core workflow
@@ -74,7 +74,7 @@ The format is inferred from the `-o` extension; pass `--format` to override it.
 
 - **PNG** (default): lossless and pixel-exact, saved as an indexed PNG at the smallest bit depth the palette allows. The right choice almost always; only lossless WebP is smaller. Add `--optimize` when file size matters more than encode time: it searches palette orders and PNG filters and compresses with Zopfli, giving PNG, APNG, and spritesheets that are typically 3–25% smaller with identical pixels, at several times the encode time (seconds per image).
 - **BMP / TIFF**: lossless, for tools that require them. BMP is palettized at 1, 4, or 8 bits when the image is opaque with at most 256 colors (else 24- or 32-bit); TIFF is Deflate-compressed. Both are still larger than PNG.
-- **WebP**: lossless only, palette-indexed, and typically 2–20% smaller than dith's PNG for dithered output (biggest gains on ordered dithers and 3+ color palettes), but slower to encode: up to about a second for a 1200×800 image with more than 16 colors. **JPEG** destroys dither patterns, so never use it for dithered output unless the user insists.
+- **WebP**: lossless only, palette-indexed, and typically 13–19% smaller than dith's PNG for dithered output (smaller than `cwebp -lossless -z 9` too), but slower to encode: a few tenths of a second for a 1200×800 image with more than 16 colors on a 4-core machine. **JPEG** destroys dither patterns, so never use it for dithered output unless the user insists.
 - **SVG**: `--svg-shape rect` (run-length merged rectangles, smallest), `circle` (halftone dots), or `dot` (inset dots). `--svg-skip-bg` drops the dominant background color for overlays. SVG grows with pixel count, and circles are much larger than rects, so keep `--max-dim` around 120–320.
 - **Terminal text**: `--format braille|ascii` with `--text-width N`. `-o` is optional and the text goes to stdout.
 - **Stdin/stdout**: pass `-` as input or as `-o -`.
@@ -87,15 +87,15 @@ The format is inferred from the `-o` extension; pass `--format` to override it.
 - several image files as a frame sequence
 - a single static image, which gets film boil (`--temporal boil` is the default for this case)
 
-Output goes to `.gif` or `.apng` (both exact-palette and delta-encoded; APNG also keeps partial transparency and is often a little smaller), a spritesheet `.png` via `--anim-format spritesheet --sheet-cols N`, or numbered PNG frames via `--frames-dir DIR`.
+Output goes to `.gif`, `.apng`, or `.webp` (all exact-palette and delta-encoded; APNG and WebP also keep partial transparency and exact timing, and lossless animated WebP is usually the smallest, often 5–15% under APNG), a spritesheet `.png` via `--anim-format spritesheet --sheet-cols N`, or numbered PNG frames via `--frames-dir DIR`.
 
 - **Flicker.** `--temporal locked` (the default) fixes the screen and seed across frames, but it only makes static regions rock-solid with per-pixel algorithms: ordered screens (`bayer*`, `halftone`, line screens), `blue-noise`, `ign`, `random`, and `threshold`. Error diffusion (`floyd-steinberg`, `atkinson`, `stucki`, `riemersma`, ...) passes every change on to neighbouring pixels, so anything that moves makes the stipple shimmer below and to the right of it. Atkinson shimmers least. The `temporally_stable` field of `dith list algorithms --json` says which is which. `boil` gives a hand-drawn shimmer on purpose; set `--boil-rate 2` to animate "on twos". `grain` re-randomizes stipple every frame.
 - **Seamless loops.** Procedural patterns loop by construction. For sweeps, use `--sweep-mode pulse` or `--ping-pong`.
 - **Sweeps** animate a parameter over time: `--sweep-bias`, `--sweep-brightness`, `--sweep-contrast`, `--sweep-gamma`, `--sweep-strength`, `--sweep-pixel-size`, each written `START..END`. Shape them with `--easing`, and pause on keyframes with `--hold-start` and `--hold-end`.
 - **Palette.** One shared global palette is the default and keeps colors steady. Use `--per-frame-palette` only for footage whose colors change a lot.
-- **Timing.** Frames are capped at 2..=240. `--duration S` is an alternative to `--frames` (frames = S × fps); passing both is an error. GIF delays are stored in 10 ms steps, so `--fps 10|20|25|50` gives exact GIF timing (15 fps becomes 70 ms per frame). APNG is exact.
+- **Timing.** Frames are capped at 2..=240. `--duration S` is an alternative to `--frames` (frames = S × fps); passing both is an error. GIF delays are stored in 10 ms steps, so `--fps 10|20|25|50` gives exact GIF timing (15 fps becomes 70 ms per frame). APNG and WebP are exact.
 - **Size.** File size grows with frames × pixels, and dither noise barely compresses.
-  - GIFs and APNGs are delta-encoded automatically: each frame after the first only stores what changed. Locked per-pixel algorithms with static areas are therefore far smaller than error diffusion or `boil`/`grain`, where nearly every pixel changes each frame.
+  - GIFs, APNGs, and WebPs are delta-encoded automatically: each frame after the first only stores what changed. Locked per-pixel algorithms with static areas are therefore far smaller than error diffusion or `boil`/`grain`, where nearly every pixel changes each frame.
   - To hit a budget, pass `--max-size 2MB` (also `500KB`, `1.5MiB`, or bytes). Dith shrinks the frame dimensions, keeping frame count and fps, until the file fits, and reports `size_fit_scale` (1.0 = untouched). If `size_fit_scale` comes back small (under about 0.5), the result may be too small to use. Lower the size another way instead: fewer frames, a locked ordered algorithm, or fewer palette colors.
   - Keep procedural canvases modest (defaults are 480×360).
 - **Procedural colors.** Without `--stops`, patterns use a plain near-black → near-white ramp. Pass `--stops` to choose the source tones deliberately; it usually looks better, especially with a colored palette.

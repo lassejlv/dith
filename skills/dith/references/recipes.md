@@ -161,6 +161,8 @@ dith animate sphere -o orb.gif \
 dith animate input.gif -o retro.apng --preset gameboy --temporal locked --json
 ```
 
+- Write `-o retro.webp` instead for lossless animated WebP, usually the smallest of the three containers.
+
 - Add `--max-frames N` to cap long inputs.
 - `--fps` overrides the source timing only when you pass it explicitly.
 

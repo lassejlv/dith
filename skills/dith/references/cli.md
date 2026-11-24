@@ -53,6 +53,7 @@ dith list algorithms --category error-diffusion --json   # categories: error-dif
 dith list palettes --tag print --json                 # tag substring, case-insensitive
 dith list generators --json
 dith list formats --json                              # raster formats, then plot formats (svg, gcode)
+dith list anim-formats --json                         # gif, apng, webp, spritesheet, frames
 dith list papers --json                               # named paper sizes for dith plot
 dith inspect photo.png --colors 6 --json              # --colors 2..=16 dominant colors
 ```
@@ -129,7 +130,7 @@ Choose one source.
 
 - `-f, --format png|webp|jpeg|gif|bmp|tiff|svg|kitty|braille|ascii`, inferred from the `-o` extension. Stdout (`-o -`) defaults to PNG.
 - SVG: `--svg-shape rect|circle|dot`, `--svg-skip-bg`
-- `--optimize`: smallest lossless PNG, APNG, spritesheet, and PNG frames (palette order and filter search plus Zopfli). Pixels are identical; encoding takes several times longer. Recorded in recipes as `export.optimize`.
+- `--optimize`: smallest lossless PNG, APNG, spritesheet, and PNG frames (palette order and filter search plus Zopfli). Pixels are identical; encoding takes several times longer. WebP output (still or animated) is unaffected: it always gets the full search. Recorded in recipes as `export.optimize`.
 - Text: `--text-width <cols>` for braille and ascii
 - Kitty: `--view-cols`, `--view-rows`
 
@@ -171,7 +172,7 @@ With `--preset`, procedural sources skip the preset's photo preparation (auto-le
 ## animate
 
 ```sh
-dith animate <PATTERN | INPUT.gif|.apng|.webp | FRAME1 FRAME2 ... | STILL.png> -o <out.gif|out.apng|sheet.png> [shared flags] [options]
+dith animate <PATTERN | INPUT.gif|.apng|.webp | FRAME1 FRAME2 ... | STILL.png> -o <out.gif|out.apng|out.webp|sheet.png> [shared flags] [options]
 ```
 
 You must pass `-o`, `--frames-dir`, or `--view`. `--pattern <name>` forces procedural mode explicitly.
@@ -180,11 +181,11 @@ You must pass `-o`, `--frames-dir`, or `--view`. `--pattern <name>` forces proce
 
 | Option | Notes |
 | --- | --- |
-| `--anim-format gif\|apng\|spritesheet\|frames` | Inferred from `-o`. A `.png` output needs `spritesheet`. |
+| `--anim-format gif\|apng\|webp\|spritesheet\|frames` | Inferred from `-o` (`.gif`, `.apng`, `.webp`). A `.png` output needs `spritesheet`. WebP is lossless animated WebP: palette-coded VP8L frames covering only the changed rectangle, with exact alpha and millisecond timing. |
 | `--sheet-cols <N>` | Spritesheet columns. Use `N = frames` for a single row. The report has `spritesheet_grid: [cols, rows]`. |
 | `--frames-dir <DIR>` | Also (or only) write `frame_0001.png`, ... |
 | `--loops <N>` | 0 = infinite (default). |
-| `--max-size <SIZE>` | File-size budget such as `2MB`, `500KB`, `1.5MiB`, or bytes (KB/MB are 1000-based). Re-renders at smaller frame dimensions, keeping frames and fps, until the output fits. Needs `-o` with gif, apng, or spritesheet output. Fails with `INVALID_ARGUMENT` if it can't fit even at 8 px. The report has `max_size_bytes` and `size_fit_scale`. |
+| `--max-size <SIZE>` | File-size budget such as `2MB`, `500KB`, `1.5MiB`, or bytes (KB/MB are 1000-based). Re-renders at smaller frame dimensions, keeping frames and fps, until the output fits. Needs `-o` with gif, apng, webp, or spritesheet output. Fails with `INVALID_ARGUMENT` if it can't fit even at 8 px. The report has `max_size_bytes` and `size_fit_scale`. |
 
 **Timing**
 

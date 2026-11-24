@@ -59,7 +59,7 @@ pub enum Command {
     Apply(ApplyArgs),
     /// Procedurally generate gradients, 3D spheres, meshes, waves, or noise and dither in one step.
     Generate(GenerateArgs),
-    /// Create animated dithers from procedural loops, GIFs, frame sequences, or boiled photos (GIF, APNG, spritesheet, or live --view).
+    /// Create animated dithers from procedural loops, GIFs, frame sequences, or boiled photos (GIF, APNG, WebP, spritesheet, or live --view).
     #[command(alias = "anim")]
     Animate(Box<AnimateArgs>),
     /// Render a dithered (or raw) fullscreen preview in the terminal via Kitty graphics protocol (or --inline / Braille / ASCII).
