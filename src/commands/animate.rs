@@ -17,7 +17,7 @@ use crate::cli::{DitherFlags, PreviewMode};
 use crate::color::{ColorSpace, Rgb};
 use crate::generate::{GenerateOptions, Pattern};
 use crate::output::{
-    ColorUsage, encode_png_bytes, render_ascii, render_braille, write_output_file,
+    ColorUsage, OutputFormat, encode_image, render_ascii, render_braille, write_output_file,
 };
 use crate::palette::Palette;
 use crate::preprocess::{FitMode, plan_dimensions};
@@ -527,10 +527,16 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
                 )?,
                 None,
             ),
-            AnimFormat::Apng => (encode_apng(&anim.frames, u32::from(args.loops))?, None),
+            AnimFormat::Apng => (
+                encode_apng(&anim.frames, u32::from(args.loops), recipe.export.optimize)?,
+                None,
+            ),
             AnimFormat::Spritesheet => {
                 let (sheet, cols, rows) = compose_spritesheet(&anim.frames, args.sheet_cols);
-                (encode_png_bytes(&sheet)?, Some([cols, rows]))
+                (
+                    encode_image(&sheet, OutputFormat::Png, &recipe.export)?,
+                    Some([cols, rows]),
+                )
             }
             AnimFormat::Frames => (Vec::new(), None),
         })
@@ -598,12 +604,12 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
     let mut spritesheet_grid = None;
 
     if let Some(dir) = &args.frames_dir {
-        write_frames_directory(&anim.frames, dir)?;
+        write_frames_directory(&anim.frames, dir, recipe.export.optimize)?;
     }
 
     if let Some(out_path) = &args.output {
         if anim_format == AnimFormat::Frames {
-            write_frames_directory(&anim.frames, out_path)?;
+            write_frames_directory(&anim.frames, out_path, recipe.export.optimize)?;
         } else if let Some((bytes, grid)) = encoded {
             spritesheet_grid = grid;
             write_output_file(out_path, &bytes)?;

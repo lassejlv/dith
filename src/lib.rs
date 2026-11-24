@@ -10,6 +10,7 @@ pub mod generate;
 pub mod inspect;
 pub mod output;
 pub mod palette;
+mod png_optimize;
 pub mod preprocess;
 pub mod preset;
 pub mod recipe;
