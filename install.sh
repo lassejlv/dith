@@ -92,15 +92,19 @@ detect_target() {
           echo "x86_64-unknown-linux-gnu"
           return 0
           ;;
+        aarch64|arm64)
+          echo "aarch64-unknown-linux-gnu"
+          return 0
+          ;;
         *)
-          echo "error: Linux prebuilt binaries only support Intel/AMD x86_64; detected '$arch'." >&2
+          echo "error: Linux prebuilt binaries only support x86_64 and aarch64; detected '$arch'." >&2
           echo "hint: build from source with: cargo install --git https://github.com/${REPO}" >&2
           exit 1
           ;;
       esac
       ;;
     *)
-      echo "error: unsupported platform '${os} ${arch}' (prebuilt binaries support macOS ARM and Linux x86_64)." >&2
+      echo "error: unsupported platform '${os} ${arch}' (prebuilt binaries support macOS ARM, Linux x86_64, and Linux aarch64)." >&2
       echo "hint: build from source with: cargo install --git https://github.com/${REPO}" >&2
       exit 1
       ;;
