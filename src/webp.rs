@@ -781,7 +781,7 @@ fn backward_references(symbols: &[u8], xsize: usize) -> Vec<Token> {
             best = Some((bits, tokens));
         }
     }
-    best.map(|(_, tokens)| tokens).unwrap_or_default()
+    best.map_or_else(Vec::new, |(_, tokens)| tokens)
 }
 
 /// Least-significant-bit-first bit writer.
