@@ -20,7 +20,7 @@ Every subcommand accepts `--json`. `dith <command> --help` is always authoritati
 ## Install, update, or run from source
 
 ```sh
-# Prebuilt binary + agent skill (macOS Apple Silicon, Linux x86_64).
+# Prebuilt binary + agent skill (macOS Apple Silicon, Linux x86_64, Linux aarch64).
 # Asks before copying the skill into each detected agent; add `-s -- --yes` to skip the prompt.
 curl -fsSL https://raw.githubusercontent.com/lassejlv/dith/main/install.sh | bash
 

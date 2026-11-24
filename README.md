@@ -24,10 +24,10 @@ An agent-friendly Rust CLI toolkit for crafting beautiful dithers, halftones, Ri
 
 ## Install & Update
 
-Prebuilt binaries are published for **macOS Apple Silicon (`aarch64-apple-darwin`)** and **Linux Intel (`x86_64-unknown-linux-gnu`)**.
+Prebuilt binaries are published for **macOS Apple Silicon (`aarch64-apple-darwin`)**, **Linux Intel (`x86_64-unknown-linux-gnu`)**, and **Linux ARM (`aarch64-unknown-linux-gnu`)**.
 
 ```bash
-# Install binary + agent skill (macOS ARM / Linux x86_64)
+# Install binary + agent skill (macOS ARM / Linux x86_64 / Linux aarch64)
 curl -fsSL https://raw.githubusercontent.com/lassejlv/dith/main/install.sh | bash
 
 # Update to the latest release anytime
