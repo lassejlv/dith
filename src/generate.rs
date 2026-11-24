@@ -4,11 +4,12 @@ use std::f32::consts::TAU;
 
 use clap::ValueEnum;
 use image::RgbaImage;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::{Oklab, Rgb};
 use crate::palette::SplitMix64;
+use crate::par::prelude::*;
+use crate::preprocess::PreprocessOptions;
 
 /// Built-in procedural source patterns fed into the dithering pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
@@ -184,6 +185,23 @@ impl Default for GenerateOptions {
             motion_amplitude: 1.0,
         }
     }
+}
+
+/// Default `dith generate` source stops: a smooth dark -> light ramp so every palette spans its
+/// full tonal range cleanly.
+pub const DEFAULT_SOURCE_STOPS: [Rgb; 2] = [Rgb::from_u32(0x0A0A0D), Rgb::from_u32(0xF7F7F9)];
+
+/// Resolve the canvas size `dith generate` renders at: an explicit recipe `width`/`height`
+/// replaces the canvas size and is cleared from `preprocess`, so the source is not resized twice.
+#[must_use]
+pub fn take_canvas_size(
+    preprocess: &mut PreprocessOptions,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> (u32, u32) {
+    let width = preprocess.width.take().unwrap_or(canvas_width).max(1);
+    let height = preprocess.height.take().unwrap_or(canvas_height).max(1);
+    (width, height)
 }
 
 /// Render a procedural source image ready to enter the preprocess + dither pipeline.

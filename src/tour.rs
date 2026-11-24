@@ -7,9 +7,11 @@
 //! tie-broken by index, so the order is deterministic.
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use rayon::prelude::*;
+use web_time::Instant;
+
+use crate::par::prelude::*;
 
 /// Neighbour-list size for 2-opt candidate moves.
 const NEIGHBOURS: usize = 10;

@@ -7,9 +7,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::str::FromStr;
 
+use crate::par::prelude::*;
 use clap::ValueEnum;
 use image::RgbaImage;
-use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::color::Rgb;

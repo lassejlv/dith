@@ -405,7 +405,7 @@ pub fn extract_adaptive_palette_from_frames(
 
     // k-means++ initialization in Oklab.
     let mut centroids: Vec<Oklab> = Vec::with_capacity(k);
-    let first = (rng.next_u64() as usize) % samples.len();
+    let first = (rng.next_u64() % samples.len() as u64) as usize;
     let mut last_centroid = samples[first];
     centroids.push(last_centroid);
 

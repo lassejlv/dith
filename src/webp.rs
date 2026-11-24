@@ -12,10 +12,10 @@ use std::collections::BinaryHeap;
 use std::ops::Range;
 use std::sync::LazyLock;
 
+use crate::par::prelude::*;
 use anyhow::{Context, Result, ensure};
 use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, ImageEncoder, RgbaImage};
-use rayon::prelude::*;
 
 use crate::output::PngLayout;
 
@@ -260,7 +260,7 @@ pub fn encode_vp8l(img: &RgbaImage) -> Result<Vec<u8>> {
 
     w.put(0, 1);
     w.put(0, 1);
-    let (tokens, meta) = rayon::scope(|_| main_image(&indices, xsize, height as usize));
+    let (tokens, meta) = crate::par::on_worker(|| main_image(&indices, xsize, height as usize));
     write_main_image(&mut w, &tokens, meta.as_ref(), xsize);
     Ok(w.finish())
 }

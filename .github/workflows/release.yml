@@ -97,3 +97,62 @@ jobs:
             dist/checksums.txt \
             --repo "${{ github.repository }}" \
             --clobber
+
+  npm:
+    name: Publish npm package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Skip without NPM_TOKEN
+        if: env.NPM_TOKEN == ''
+        run: echo "::notice::NPM_TOKEN secret is not set; skipping npm publish."
+
+      - name: Checkout repository
+        if: env.NPM_TOKEN != ''
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install Rust toolchain
+        if: env.NPM_TOKEN != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen and wasm-opt
+        if: env.NPM_TOKEN != ''
+        run: scripts/install-wasm-tools.sh
+
+      - name: Install Node
+        if: env.NPM_TOKEN != ''
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Check package version matches the release tag
+        if: env.NPM_TOKEN != ''
+        working-directory: npm
+        run: test "v$(node -p 'require("./package.json").version')" = "$TAG"
+
+      - name: Build and test
+        if: env.NPM_TOKEN != ''
+        run: |
+          scripts/build-wasm.sh
+          cd npm
+          npm ci
+          npm run build
+          npx vp check
+          npx vp test
+
+      - name: Publish to npm
+        if: env.NPM_TOKEN != ''
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public

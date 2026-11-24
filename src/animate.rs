@@ -8,7 +8,6 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
@@ -16,9 +15,9 @@ use image::codecs::gif::GifDecoder;
 use image::codecs::png::PngDecoder;
 use image::codecs::webp::WebPDecoder;
 use image::{AnimationDecoder, Rgba, RgbaImage};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use web_time::Instant;
 
 use crate::color::Rgb;
 use crate::dither::dither_image;
@@ -28,6 +27,7 @@ use crate::output::{
     write_output_file,
 };
 use crate::palette::{Palette, extract_adaptive_palette, extract_adaptive_palette_from_frames};
+use crate::par::prelude::*;
 use crate::preprocess::{finalize_image, prepare_image};
 use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError};
 use crate::webp::{AnimationFrame as WebpFrame, encode_animation, encode_vp8l};

@@ -34,6 +34,58 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+  wasm:
+    name: WebAssembly & npm package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      - name: Clippy (wasm32, wasm feature)
+        run: cargo clippy --locked --lib --target wasm32-unknown-unknown --no-default-features --features wasm -- -D warnings
+
+      - name: Install wasm-bindgen and wasm-opt
+        run: scripts/install-wasm-tools.sh
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Build WebAssembly module
+        run: scripts/build-wasm.sh
+
+      - name: Build native CLI for parity checks
+        run: cargo build --locked
+
+      - name: npm package (vp pack, vp check, vp test with CLI parity)
+        working-directory: npm
+        env:
+          DITH_BIN: ${{ github.workspace }}/target/debug/dith
+        run: |
+          npm ci
+          npm run build
+          npx vp check
+          npx vp test
+
+      - name: Playground (vp check, vp build)
+        working-directory: web
+        run: |
+          npm ci
+          npx vp check
+          npx vp build
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -7,20 +7,32 @@ description = "Agent-friendly CLI tool for crafting beautiful dithered images, v
 [[bin]]
 name = "dith"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# The native command-line tool: terminal viewer, self-update, and every subcommand.
+cli = ["dep:crossterm", "parallel"]
+# Multi-threaded rendering via rayon (outputs are identical with or without it).
+parallel = ["dep:rayon"]
+# wasm-bindgen API for browsers and Node (build with --no-default-features --features wasm).
+wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
-crossterm = "0.29"
+crossterm = { version = "0.29", optional = true }
 flate2 = "1"
 gif = "0.14"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
 png = "0.18"
-rayon = "1"
+rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tiff = { version = "0.11", default-features = false, features = ["deflate"] }
+wasm-bindgen = { version = "0.2", optional = true }
+web-time = "1"
 zopfli = { version = "0.8", default-features = false, features = ["std", "zlib"] }
 
 [dev-dependencies]
@@ -37,6 +49,12 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Size-tuned profile for the browser/npm build (see scripts/build-wasm.sh).
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+strip = false
 
 [lints.rust]
 unsafe_code = "forbid"

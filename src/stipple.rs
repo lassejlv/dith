@@ -12,7 +12,7 @@
 //! partial centroid sums are merged in a fixed order so results are byte-identical regardless of
 //! thread count.
 
-use rayon::prelude::*;
+use crate::par::prelude::*;
 
 use crate::palette::SplitMix64;
 

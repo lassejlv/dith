@@ -17,6 +17,7 @@ Every subcommand accepts `--json`. `dith <command> --help` is always authoritati
 - [plot](#plot) (pen plotters: stippled SVG and G-code)
 - [JSON reports](#json-reports)
 - [Errors and exit codes](#errors-and-exit-codes)
+- [Browser and Node (WebAssembly)](#browser-and-node-webassembly)
 
 ## Install, update, or run from source
 
@@ -397,3 +398,21 @@ With `--json`, errors are printed to stderr:
 | 1 | Runtime or I/O failure | `RUNTIME_ERROR` (missing or undecodable input, write failure, batch item failures) |
 
 Without `--json`, errors print as `error [CODE]: message` followed by `hint: suggestion`.
+
+## Browser and Node (WebAssembly)
+
+The `dith` npm package wraps the same engine compiled to WebAssembly (ESM, browsers and Node 20+), with a worker pool in browsers. It renders a recipe to the same bytes as the CLI.
+
+```ts
+import { render, source, latest, cliCommand, resolveRecipe } from "dith";
+const out = await render(file, { preset: "risograph", maxDim: 1200, format: "png" }); // out.bytes, out.mime, out.report
+const orb = await render({ pattern: "sphere", width: 800, height: 600 }, { preset: "editorial-print", format: "svg" }); // orb.text
+cliCommand({ options: { preset: "risograph", maxDim: 1200 }, input: "photo.jpg" }).command; // dith apply photo.jpg -o out.png --preset risograph --max-dim 1200
+```
+
+- Options are every recipe knob named after its flag (`maxDim`, `pixelSize`, `palette: ["#111", "#eee"]` or `auto(8)`, ...), layered like the CLI: `recipe`, then `preset`, then the rest. `resolveRecipe()` gives the `--emit-recipe` JSON; `parseRecipe()`/`stringifyRecipe()` read and write it.
+- Generator presets drop photo preparation the way `generate --preset` does.
+- `format` picks the result: `png`/`webp`/... bytes, `svg`/`braille`/`ascii` text, `bitmap`, `rgba`, `output: "blob"`, or `target: canvas`. `preview: N` renders a fast reduced approximation; `source(input)` decodes once for many renders, and `latest()` drops superseded renders.
+- Errors are `DithError`s with the CLI's `code`s plus `ABORTED`, `INVALID_INPUT`, `UNSUPPORTED`, `WORKER_ERROR`. TIFF input is not decoded in WebAssembly; use `parsePalette()` instead of `--palette-file`. Animations are CLI-only.
+- The playground in `web/` (deployed to GitHub Pages) uses the package and copies the exact `dith apply`/`dith generate` command, or a recipe file for `--recipe`.
+- Build: `scripts/build-wasm.sh`, then `npm run build` in `npm/` (types generated from the engine, `vp pack`); `cargo build --lib --target wasm32-unknown-unknown --no-default-features --features wasm` builds the library alone.
