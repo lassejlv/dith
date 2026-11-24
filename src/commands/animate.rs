@@ -25,7 +25,9 @@ use crate::preset::{OverwritePolicy, PresetScope, SavePresetRequest, save_local_
 use crate::recipe::{DitherRecipe, RecipeError};
 use crate::viewer::{FullscreenAnimInput, ViewerBackend, run_fullscreen_animation_viewer};
 
-use super::shared::{emit_inline_kitty, load_input_image, palette_spec_label};
+use super::shared::{
+    emit_inline_kitty, emit_json, load_input_image, offer_preview, palette_spec_label,
+};
 
 #[derive(Debug, Args)]
 pub struct AnimateArgs {
@@ -474,7 +476,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
             recipe: Some(recipe),
         };
         if as_json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            emit_json(&report)?;
         } else {
             println!(
                 "Dry run: {} ({} frames @ {}fps, {}x{}, algo={}, temporal={}, format={})",
@@ -591,6 +593,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         size_fit_scale = Some(((scale * 1000.0).round() / 1000.0) as f32);
     }
 
+    offer_preview(&anim.frames[anim.frames.len() / 2].image);
     let total_duration_ms: u64 = anim.frames.iter().map(|f| u64::from(f.delay_ms)).sum();
     let effective_fps = if total_duration_ms > 0 {
         ((anim.frames.len() as f64 * 1000.0) / total_duration_ms as f64)
@@ -669,7 +672,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
     }
 
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else if wants_view && args.output.is_none() && args.frames_dir.is_none() {
         // Non-TTY or --inline fallback: emit first frame via Kitty graphics / Braille / ASCII.
         let first = &anim.frames[0].image;

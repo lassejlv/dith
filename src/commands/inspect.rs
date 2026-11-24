@@ -7,6 +7,8 @@ use clap::Args;
 
 use crate::inspect::inspect_image;
 
+use super::shared::emit_json;
+
 #[derive(Debug, Args)]
 pub struct InspectArgs {
     /// Path to the image file to analyze.
@@ -20,7 +22,7 @@ pub struct InspectArgs {
 pub(crate) fn handle_inspect(args: &InspectArgs, as_json: bool) -> Result<()> {
     let report = inspect_image(&args.input, args.colors)?;
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else {
         println!(
             "Image: {} ({}x{}, {})",

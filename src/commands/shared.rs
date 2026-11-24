@@ -1,5 +1,6 @@
 //! Input loading, output destination, and render report helpers shared by several commands.
 
+use std::cell::RefCell;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::Path;
 
@@ -12,6 +13,67 @@ use crate::output::{
     ColorUsage, ExportOptions, KittyOptions, OutputFormat, render_kitty, write_output_file,
 };
 use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError};
+
+/// Longest side, in pixels, of the preview image an in-process [`capture`] keeps.
+pub(crate) const PREVIEW_MAX_DIM: u32 = 512;
+
+/// What a command handler produced while running under [`capture`] instead of printing.
+#[derive(Debug, Default)]
+pub(crate) struct Capture {
+    /// The handler's JSON report, serialized compactly.
+    pub(crate) report: Option<String>,
+    /// The rendered result, box-averaged by a whole factor to at most [`PREVIEW_MAX_DIM`] on its
+    /// longest side, so every preview pixel covers the same source area and dither screens do not
+    /// beat into moiré.
+    pub(crate) preview: Option<RgbaImage>,
+}
+
+thread_local! {
+    static CAPTURE: RefCell<Option<Capture>> = const { RefCell::new(None) };
+}
+
+/// Run a command handler in-process with its JSON report and preview image captured instead of
+/// written to stdout, so `dith mcp` can reuse the exact CLI code paths on its protocol channel.
+pub(crate) fn capture(run: impl FnOnce() -> Result<()>) -> (Result<()>, Capture) {
+    CAPTURE.set(Some(Capture::default()));
+    let result = run();
+    (result, CAPTURE.take().unwrap_or_default())
+}
+
+/// Print a JSON report to stdout (pretty), or hand it to the active [`capture`] (compact).
+pub(crate) fn emit_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
+    let capturing = CAPTURE.with_borrow(Option::is_some);
+    if !capturing {
+        println!("{}", serde_json::to_string_pretty(value)?);
+        return Ok(());
+    }
+    let json = serde_json::to_string(value)?;
+    CAPTURE.with_borrow_mut(|slot| {
+        if let Some(capture) = slot {
+            capture.report = Some(json);
+        }
+    });
+    Ok(())
+}
+
+/// Offer the rendered image as the preview of an active [`capture`]; a no-op for the CLI.
+///
+/// Only the first offer is kept, and only a downscaled copy is stored.
+pub(crate) fn offer_preview(img: &RgbaImage) {
+    CAPTURE.with_borrow_mut(|slot| {
+        let Some(capture) = slot else { return };
+        if capture.preview.is_some() {
+            return;
+        }
+        let (w, h) = img.dimensions();
+        let factor = w.max(h).div_ceil(PREVIEW_MAX_DIM);
+        capture.preview = Some(if factor <= 1 {
+            img.clone()
+        } else {
+            image::imageops::thumbnail(img, (w / factor).max(1), (h / factor).max(1))
+        });
+    });
+}
 
 /// Structured result emitted for `apply` and `generate`.
 #[derive(Debug, Serialize)]
@@ -182,8 +244,7 @@ pub(crate) fn emit_render_report(
     wrote_stdout_payload: bool,
 ) -> Result<()> {
     if as_json {
-        println!("{}", serde_json::to_string_pretty(report)?);
-        return Ok(());
+        return emit_json(report);
     }
     if wrote_stdout_payload {
         return Ok(());

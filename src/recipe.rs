@@ -450,6 +450,11 @@ pub fn build_capabilities() -> CapabilitiesManifest {
                 example: "dith list palettes --tag risograph --json",
             },
             CommandCapability {
+                name: "mcp",
+                summary: "Serve dith as a Model Context Protocol server over stdio (tools: dith_apply, dith_generate, dith_animate, dith_compare, dith_inspect, dith_list, dith_capabilities) for Claude Code, Cursor, Codex, and other MCP clients.",
+                example: "claude mcp add dith -- dith mcp",
+            },
+            CommandCapability {
                 name: "update",
                 summary: "Update dith from GitHub Releases (macOS ARM & Linux x86_64) and silently refresh agent skills.",
                 example: "dith update --check --json",

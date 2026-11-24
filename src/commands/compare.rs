@@ -17,7 +17,9 @@ use crate::palette::Palette;
 use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError, run_pipeline};
 use crate::viewer::{FullscreenViewerInput, ViewerBackend, run_fullscreen_viewer};
 
-use super::shared::{emit_inline_kitty, load_input_image, palette_spec_label};
+use super::shared::{
+    emit_inline_kitty, emit_json, load_input_image, offer_preview, palette_spec_label,
+};
 
 #[derive(Debug, Args)]
 pub struct CompareArgs {
@@ -149,7 +151,7 @@ pub(crate) fn handle_compare(args: &CompareArgs, as_json: bool) -> Result<()> {
             variants,
         };
         if as_json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            emit_json(&report)?;
         } else {
             println!(
                 "Dry run: would render {} comparison variants from {}",
@@ -219,6 +221,7 @@ pub(crate) fn handle_compare(args: &CompareArgs, as_json: bool) -> Result<()> {
     let composed_sheet = if args.output.is_some() || wants_view {
         let sheet = compose_contact_sheet(&tiles, args.columns, !args.light);
         sheet_dims = [sheet.width(), sheet.height()];
+        offer_preview(&sheet);
         if let Some(sheet_path) = &args.output {
             let fmt = OutputFormat::infer_from_path(sheet_path);
             let export = ExportOptions {
@@ -272,7 +275,7 @@ pub(crate) fn handle_compare(args: &CompareArgs, as_json: bool) -> Result<()> {
     }
 
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json(&report)?;
     } else {
         if let Some(sheet) = &report.sheet_output {
             println!(

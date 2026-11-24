@@ -17,7 +17,7 @@ use crate::recipe::{RecipeError, run_pipeline};
 use crate::viewer::{FullscreenViewerInput, ViewerBackend, run_fullscreen_viewer};
 
 use super::shared::{
-    RenderReport, emit_inline_kitty, emit_render_report, ensure_output_destination,
+    RenderReport, emit_inline_kitty, emit_render_report, ensure_output_destination, offer_preview,
     palette_spec_label, resolve_output_format, write_destination,
 };
 
@@ -180,6 +180,7 @@ pub(crate) fn handle_generate(args: &GenerateArgs, as_json: bool) -> Result<()> 
 
     let src_img = generate_pattern(&gen_opts);
     let output_data = run_pipeline(&src_img, &recipe)?;
+    offer_preview(&output_data.image);
 
     let interactive_fullscreen = wants_fullscreen && !as_json && io::stdout().is_terminal();
     let encoded = encode_image(&output_data.image, format, &recipe.export)?;

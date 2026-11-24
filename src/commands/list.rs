@@ -9,6 +9,8 @@ use crate::palette::list_builtin_palettes;
 use crate::preset::list_all_presets;
 use crate::recipe::build_capabilities;
 
+use super::shared::emit_json;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ListKind {
     Algorithms,
@@ -56,7 +58,7 @@ pub(crate) fn handle_list(args: &ListArgs, as_json: bool) -> Result<()> {
                 })
                 .collect();
             if as_json {
-                println!("{}", serde_json::to_string_pretty(&items)?);
+                emit_json(&items)?;
             } else {
                 for a in items {
                     println!(
@@ -82,7 +84,7 @@ pub(crate) fn handle_list(args: &ListArgs, as_json: bool) -> Result<()> {
                 })
                 .collect();
             if as_json {
-                println!("{}", serde_json::to_string_pretty(&items)?);
+                emit_json(&items)?;
             } else {
                 for p in items {
                     println!(
@@ -105,7 +107,7 @@ pub(crate) fn handle_list(args: &ListArgs, as_json: bool) -> Result<()> {
                 })
                 .collect();
             if as_json {
-                println!("{}", serde_json::to_string_pretty(&items)?);
+                emit_json(&items)?;
             } else {
                 for p in items {
                     println!(
@@ -121,7 +123,7 @@ pub(crate) fn handle_list(args: &ListArgs, as_json: bool) -> Result<()> {
         ListKind::Generators => {
             let items: Vec<_> = Pattern::ALL.iter().map(|p| p.info()).collect();
             if as_json {
-                println!("{}", serde_json::to_string_pretty(&items)?);
+                emit_json(&items)?;
             } else {
                 for g in items {
                     println!("{:<18} {} — Best for: {}", g.id, g.description, g.best_for);
@@ -131,7 +133,7 @@ pub(crate) fn handle_list(args: &ListArgs, as_json: bool) -> Result<()> {
         ListKind::Formats => {
             let caps = build_capabilities();
             if as_json {
-                println!("{}", serde_json::to_string_pretty(&caps.output_formats)?);
+                emit_json(&caps.output_formats)?;
             } else {
                 for f in caps.output_formats {
                     println!("{:<10} {}", f.id, f.description);

@@ -21,6 +21,7 @@ An agent-friendly Rust CLI toolkit for crafting beautiful dithers, halftones, Ri
   - `dith capabilities` — one-shot self-describing JSON manifest of every command, algorithm, preset, palette, generator, flag, and range.
   - `--json` global flag — deterministic structured JSON results (dimensions, palette usage histogram, elapsed ms, optional inline Braille preview) and structured JSON errors with `code`, `suggestion`, and `valid_values`.
   - `--dry-run`, `--no-clobber`, `--emit-recipe`, `--recipe <path|->`, stdin/stdout `-`, `inspect`, `compare` contact sheets, and parallel `batch`.
+  - `dith mcp` — a built-in Model Context Protocol server, so Claude Code, Cursor, Codex, and other MCP clients call dith as native tools and see a PNG preview of every render.
 
 ## Install & Update
 
@@ -42,6 +43,30 @@ mbx run -- --help
 ```
 
 An agent skill for using `dith` lives in [`skills/dith/SKILL.md`](skills/dith/SKILL.md).
+
+## Use with Claude Code / Cursor / Codex (MCP)
+
+`dith mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. It exposes `dith_apply`, `dith_generate`, `dith_animate`, `dith_compare`, `dith_inspect`, `dith_list`, and `dith_capabilities`, with input schemas generated from the CLI flags. Each call runs in-process and returns the same JSON report as `--json`, plus a PNG preview (at most 512px) of rendered images so the agent can see the result. Relative paths resolve against the directory the client starts the server in.
+
+```bash
+# Claude Code
+claude mcp add dith -- dith mcp
+
+# Codex
+codex mcp add dith -- dith mcp
+```
+
+Cursor (`.cursor/mcp.json`), Claude Desktop, and other clients that take a JSON config:
+
+```json
+{
+  "mcpServers": {
+    "dith": { "command": "dith", "args": ["mcp"] }
+  }
+}
+```
+
+The server speaks both the current stateless protocol revision (2026-07-28, `server/discover`) and the `initialize` handshake of revisions 2024-11-05 through 2025-11-25.
 
 ## Agent Quickstart
 

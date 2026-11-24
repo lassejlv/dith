@@ -14,6 +14,7 @@ Every subcommand accepts `--json`. `dith <command> --help` is always authoritati
 - [batch](#batch)
 - [preview](#preview)
 - [preset](#preset)
+- [mcp](#mcp)
 - [JSON reports](#json-reports)
 - [Errors and exit codes](#errors-and-exit-codes)
 
@@ -285,6 +286,33 @@ dith preset delete <name> [--scope project|user | --dir DIR] --json
   - user: `~/.config/dith/presets/<name>.json`
 - Lookup order: `$DITH_PRESETS_DIR`, then `.dith/presets/`, then `~/.config/dith/presets/`, then built-ins. A local preset with a built-in's name shadows the built-in.
 - From a render, `--save-preset <name> --preset-scope project|user` on `apply` or `generate` saves the resolved settings in one step.
+
+## mcp
+
+`dith mcp` serves dith as a Model Context Protocol server over stdio (newline-delimited JSON-RPC 2.0). It never writes anything to stdout except protocol messages and exits when stdin closes.
+
+```sh
+claude mcp add dith -- dith mcp          # Claude Code
+codex mcp add dith -- dith mcp           # Codex
+# Cursor / Claude Desktop JSON config: {"mcpServers": {"dith": {"command": "dith", "args": ["mcp"]}}}
+```
+
+| Tool | CLI equivalent | Returns |
+| --- | --- | --- |
+| `dith_apply` | `apply` | render report + PNG preview |
+| `dith_generate` | `generate` | render report + PNG preview |
+| `dith_animate` | `animate` | animation report + PNG preview of the middle frame |
+| `dith_compare` | `compare` | comparison report + PNG preview of the sheet |
+| `dith_inspect` | `inspect` | inspection report |
+| `dith_list` | `list` | catalog array |
+| `dith_capabilities` | `capabilities` | manifest, or one top-level `section` of it |
+
+- Arguments are the command's flags as snake_case properties: `{"input": "photo.png", "output": "out.png", "preset": "mac-classic", "max_dim": 960}`. Positional arguments use their names (`input`, `inputs`, `pattern`, `kind`), list flags take arrays (`"presets": ["risograph", "gameboy"]`), and switches take booleans.
+- Rendering tools also take `recipe` (an inline recipe object, such as the `recipe` field of an `emit_recipe` report), `recipe_file` (the `--recipe` path), and `include_image` (default `true`; the preview is box-averaged by a whole factor to at most 512px, so an 800×600 render previews at 400×300).
+- Not available over MCP: `-` for stdin/stdout, the terminal viewers (`view`, `inline`, `fullscreen`, `view_mode`, `view_cols`, `view_rows`), and `save_preset`. Files are written only to `output`, `frames_dir`, and `out_dir`.
+- Relative paths resolve against the server's working directory, which the server states in its instructions.
+- Errors are tool results with `isError: true` whose text is the usual JSON error envelope (`code`, `message`, `suggestion`, `valid_values`). Unknown properties return `INVALID_ARGUMENT` with the valid property names.
+- Protocol: revision 2026-07-28 (stateless, `server/discover`, version in each request's `_meta`) and the `initialize` handshake of 2024-11-05 through 2025-11-25.
 
 ## JSON reports
 

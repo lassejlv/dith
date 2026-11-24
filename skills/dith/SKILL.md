@@ -14,6 +14,10 @@ description: >-
 
 ## Setup
 
+If a dith MCP server is connected (tools named `dith_apply`, `dith_generate`, `dith_animate`, `dith_compare`, `dith_inspect`, `dith_list`, `dith_capabilities`), use those tools instead of the shell. They take the CLI flags as snake_case properties (`--max-dim 960` becomes `"max_dim": 960`, `--no-clobber` becomes `"no_clobber": true`), return the same JSON report as `--json`, and attach a PNG preview of every render that you can look at directly. Errors come back as tool results with `isError` and the same `code`, `suggestion`, and `valid_values`. Everything below applies unchanged. See [references/cli.md](references/cli.md#mcp) for the tool list and setup.
+
+Otherwise use the CLI:
+
 1. Check for the binary with `dith --version`.
    - Inside the dith source checkout without a global install, run it via `cargo run --release -- <args>` (or `mbx run -- <args>` when `mbx` is available).
    - If dith is missing, tell the user and offer an install command from [references/cli.md](references/cli.md#install-update-or-run-from-source). Wait for their approval before installing anything.

@@ -31,8 +31,8 @@ pub use crate::commands::update::UpdateArgs;
 use crate::commands::{
     animate::handle_animate, apply::handle_apply, batch::handle_batch,
     capabilities::handle_capabilities, compare::handle_compare, generate::handle_generate,
-    inspect::handle_inspect, list::handle_list, preset::handle_preset, preview::handle_preview,
-    update::handle_update,
+    inspect::handle_inspect, list::handle_list, mcp::handle_mcp, preset::handle_preset,
+    preview::handle_preview, update::handle_update,
 };
 
 /// Top-level CLI entrypoint.
@@ -74,6 +74,8 @@ pub enum Command {
     Inspect(InspectArgs),
     /// List available algorithms, palettes, presets, generators, or formats.
     List(ListArgs),
+    /// Run a Model Context Protocol server over stdio so agents (Claude Code, Cursor, Codex) can call dith as native tools.
+    Mcp,
     /// Update dith to the latest GitHub Release binary (and refresh agent skills).
     Update(UpdateArgs),
     /// Dump a complete self-describing JSON manifest of all commands, options, ranges, presets, and palettes.
@@ -247,6 +249,10 @@ pub struct DitherFlags {
     /// Spend extra CPU for the smallest lossless PNG/APNG (palette, filter, and Zopfli search).
     #[arg(long)]
     pub optimize: bool,
+
+    /// Base recipe passed in-process (by `dith mcp`) instead of through `--recipe`; not a CLI flag.
+    #[arg(skip)]
+    pub inline_recipe: Option<DitherRecipe>,
 }
 
 impl DitherFlags {
@@ -268,7 +274,9 @@ impl DitherFlags {
         allow_stdin_recipe: bool,
         procedural: bool,
     ) -> Result<DitherRecipe, RecipeError> {
-        let mut recipe = if let Some(path) = &self.recipe {
+        let mut recipe = if let Some(inline) = &self.inline_recipe {
+            inline.clone()
+        } else if let Some(path) = &self.recipe {
             let raw = if path.as_os_str() == "-" {
                 if !allow_stdin_recipe {
                     return Err(RecipeError::Validation {
@@ -457,6 +465,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Capabilities => handle_capabilities(),
         Command::List(args) => handle_list(&args, cli.json),
+        Command::Mcp => handle_mcp(),
         Command::Inspect(args) => handle_inspect(&args, cli.json),
         Command::Apply(args) => handle_apply(&args, cli.json),
         Command::Generate(args) => handle_generate(&args, cli.json),
