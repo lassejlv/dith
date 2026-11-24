@@ -1,6 +1,6 @@
 [package]
 name = "dith"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Agent-friendly CLI tool for crafting beautiful dithered images, vector halftone SVGs, procedural dither art, and visual comparison sheets."
 
