@@ -29,9 +29,9 @@ pub enum OutputFormat {
     Jpeg,
     /// Animated-capable GIF (crisp indexed output).
     Gif,
-    /// Uncompressed BMP.
+    /// Lossless BMP (palettized 1/4/8-bit when opaque with at most 256 colors).
     Bmp,
-    /// Lossless TIFF.
+    /// Lossless Deflate-compressed TIFF.
     Tiff,
     /// Crisp vector SVG (run-length merged rects or halftone circles/dots).
     Svg,
@@ -117,6 +117,9 @@ pub struct ExportOptions {
     pub view_cols: Option<u32>,
     /// Display height in terminal rows when rendering inline with Kitty graphics (`r=`).
     pub view_rows: Option<u32>,
+    /// Spend extra CPU on the smallest lossless PNG/APNG (palette, filter, and Zopfli search).
+    #[serde(default)]
+    pub optimize: bool,
 }
 
 /// Per-color usage statistics returned in structured JSON output.
@@ -223,12 +226,11 @@ pub fn encode_image(
         }
         OutputFormat::Braille => Ok(render_braille(img, export.text_width).into_bytes()),
         OutputFormat::Ascii => Ok(render_ascii(img, export.text_width).into_bytes()),
+        OutputFormat::Png if export.optimize => encode_optimized_png_bytes(img),
         OutputFormat::Png => encode_png_bytes(img),
-        OutputFormat::Webp
-        | OutputFormat::Jpeg
-        | OutputFormat::Gif
-        | OutputFormat::Bmp
-        | OutputFormat::Tiff => {
+        OutputFormat::Bmp => encode_bmp(img),
+        OutputFormat::Tiff => encode_tiff(img),
+        OutputFormat::Webp | OutputFormat::Jpeg | OutputFormat::Gif => {
             let dyn_img = if matches!(format, OutputFormat::Jpeg) {
                 DynamicImage::ImageRgba8(img.clone()).to_rgb8().into()
             } else {
@@ -238,14 +240,14 @@ pub fn encode_image(
                 OutputFormat::Webp => ImageFormat::WebP,
                 OutputFormat::Jpeg => ImageFormat::Jpeg,
                 OutputFormat::Gif => ImageFormat::Gif,
-                OutputFormat::Bmp => ImageFormat::Bmp,
-                OutputFormat::Tiff => ImageFormat::Tiff,
                 OutputFormat::Png
+                | OutputFormat::Bmp
+                | OutputFormat::Tiff
                 | OutputFormat::Svg
                 | OutputFormat::Kitty
                 | OutputFormat::Braille
                 | OutputFormat::Ascii => {
-                    unreachable!("PNG and text/terminal formats handled above")
+                    unreachable!("PNG, BMP, TIFF, and text/terminal formats handled above")
                 }
             };
             let mut cursor = Cursor::new(Vec::new());
@@ -558,6 +560,15 @@ pub fn encode_png_bytes(img: &RgbaImage) -> Result<Vec<u8>> {
     encode_png(img, png::Compression::High)
 }
 
+/// Like [`encode_png_bytes`], but spends far more CPU for the smallest possible file: the palette
+/// order and PNG filter strategy are searched, and the image data is compressed with Zopfli.
+///
+/// # Errors
+/// Returns an error if PNG encoding fails.
+pub fn encode_optimized_png_bytes(img: &RgbaImage) -> Result<Vec<u8>> {
+    crate::png_optimize::recompress(&encode_png(img, png::Compression::NoCompression)?)
+}
+
 /// Fast lossless PNG encoding tailored for live interactive Kitty graphics previews.
 ///
 /// Uses the same compact layout as [`encode_png_bytes`] with much cheaper DEFLATE settings.
@@ -580,6 +591,103 @@ fn encode_png(img: &RgbaImage, compression: png::Compression) -> Result<Vec<u8>>
             .context("writing PNG pixel data")?;
     }
     Ok(out)
+}
+
+/// Encode `img` as the most compact exact BMP: a 1-, 4-, or 8-bit palette when it is opaque with at
+/// most 256 colors, else 24-bit RGB when opaque, else 32-bit BGRA.
+fn encode_bmp(img: &RgbaImage) -> Result<Vec<u8>> {
+    let layout = PngLayout::for_images([img]);
+    if let PngLayout::Indexed(palette) = &layout
+        && palette.iter().all(|c| c[3] == 255)
+    {
+        return Ok(encode_indexed_bmp(img, palette));
+    }
+    let (pixels, _) = img.as_raw().as_chunks::<4>();
+    let (data, color) = if matches!(layout, PngLayout::Rgb) {
+        let rgb: Vec<u8> = pixels.iter().flat_map(|px| [px[0], px[1], px[2]]).collect();
+        (rgb, image::ExtendedColorType::Rgb8)
+    } else {
+        (img.as_raw().clone(), image::ExtendedColorType::Rgba8)
+    };
+    let mut out = Vec::new();
+    image::codecs::bmp::BmpEncoder::new(&mut out)
+        .encode(&data, img.width(), img.height(), color)
+        .context("encoding bmp output")?;
+    Ok(out)
+}
+
+/// Write an uncompressed bottom-up palettized BMP (`BITMAPINFOHEADER`) at the smallest bit depth
+/// BMP supports for `palette` (1, 4, or 8 bits per pixel).
+fn encode_indexed_bmp(img: &RgbaImage, palette: &[[u8; 4]]) -> Vec<u8> {
+    const HEADERS_SIZE: usize = 14 + 40;
+    let depth: usize = match palette.len() {
+        0..=2 => 1,
+        3..=16 => 4,
+        _ => 8,
+    };
+    let lookup: HashMap<[u8; 4], u8> = palette
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (c, i as u8))
+        .collect();
+    let width = img.width() as usize;
+    let per_byte = 8 / depth;
+    let row_len = width.div_ceil(per_byte).next_multiple_of(4);
+    let pixel_offset = HEADERS_SIZE + palette.len() * 4;
+    let image_size = row_len * img.height() as usize;
+
+    let mut out = Vec::with_capacity(pixel_offset + image_size);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&((pixel_offset + image_size) as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(pixel_offset as u32).to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&img.width().to_le_bytes());
+    out.extend_from_slice(&img.height().to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&(depth as u16).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(image_size as u32).to_le_bytes());
+    out.extend_from_slice(&[0; 8]);
+    out.extend_from_slice(&(palette.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for c in palette {
+        out.extend_from_slice(&[c[2], c[1], c[0], 0]);
+    }
+    let (pixels, _) = img.as_raw().as_chunks::<4>();
+    for row in pixels.chunks(width.max(1)).rev() {
+        let start = out.len();
+        out.resize(start + row_len, 0);
+        for (x, px) in row.iter().enumerate() {
+            out[start + x / per_byte] |= lookup[px] << (8 - depth * (x % per_byte + 1));
+        }
+    }
+    out
+}
+
+/// Encode `img` as a Deflate-compressed TIFF in the smallest exact sample layout: 8-bit gray when
+/// it is opaque and colorless, else RGB when opaque, else RGBA.
+fn encode_tiff(img: &RgbaImage) -> Result<Vec<u8>> {
+    use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
+
+    let (width, height) = img.dimensions();
+    let (pixels, _) = img.as_raw().as_chunks::<4>();
+    let opaque = pixels.iter().all(|px| px[3] == 255);
+    let mut out = Cursor::new(Vec::new());
+    let mut encoder = TiffEncoder::new(&mut out)
+        .context("encoding tiff output")?
+        .with_compression(Compression::Deflate(DeflateLevel::Best));
+    if opaque && pixels.iter().all(|px| px[0] == px[1] && px[1] == px[2]) {
+        let gray: Vec<u8> = pixels.iter().map(|px| px[0]).collect();
+        encoder.write_image::<colortype::Gray8>(width, height, &gray)
+    } else if opaque {
+        let rgb: Vec<u8> = pixels.iter().flat_map(|px| [px[0], px[1], px[2]]).collect();
+        encoder.write_image::<colortype::RGB8>(width, height, &rgb)
+    } else {
+        encoder.write_image::<colortype::RGBA8>(width, height, img.as_raw())
+    }
+    .context("encoding tiff output")?;
+    Ok(out.into_inner())
 }
 
 /// The most compact exact PNG pixel layout for a set of images (one still, or every animation frame).
@@ -867,6 +975,68 @@ mod tests {
         let (layout, decoded) = decode(&photo);
         assert_eq!(layout, (png::ColorType::Rgb, png::BitDepth::Eight, false));
         assert_eq!(decoded, photo);
+    }
+
+    fn layout_samples() -> Vec<RgbaImage> {
+        let mut two_tone = RgbaImage::from_pixel(13, 5, Rgba([244, 240, 228, 255]));
+        two_tone.put_pixel(12, 4, Rgba([26, 43, 140, 255]));
+        let mut cutout = two_tone.clone();
+        cutout.put_pixel(0, 0, Rgba([0, 0, 0, 0]));
+        cutout.put_pixel(1, 0, Rgba([9, 9, 9, 100]));
+        let tones = |n: u32| {
+            RgbaImage::from_fn(37, 23, move |x, y| {
+                let i = ((x * 7 + y * 3) % n) as u8;
+                Rgba([i * 11, 255 - i * 5, i, 255])
+            })
+        };
+        let photo = RgbaImage::from_fn(32, 32, |x, y| Rgba([(x * 8) as u8, (y * 8) as u8, 7, 255]));
+        let translucent =
+            RgbaImage::from_fn(32, 32, |x, y| Rgba([(x * 8) as u8, 90, 7, (y * 8) as u8]));
+        let gray = RgbaImage::from_fn(30, 20, |x, y| {
+            let v = if (x + y) % 3 == 0 { 0 } else { 200 };
+            Rgba([v, v, v, 255])
+        });
+        vec![
+            two_tone,
+            cutout,
+            tones(5),
+            tones(20),
+            photo,
+            translucent,
+            gray,
+        ]
+    }
+
+    #[test]
+    fn optimized_png_round_trips_and_never_grows() {
+        for img in layout_samples() {
+            let optimized = encode_optimized_png_bytes(&img).unwrap();
+            assert_eq!(image::load_from_memory(&optimized).unwrap().to_rgba8(), img);
+            assert!(optimized.len() <= encode_png_bytes(&img).unwrap().len());
+        }
+    }
+
+    #[test]
+    fn bmp_uses_smallest_exact_layout() {
+        let bits_per_pixel: Vec<u16> = layout_samples()
+            .iter()
+            .map(|img| {
+                let bytes =
+                    encode_image(img, OutputFormat::Bmp, &ExportOptions::default()).unwrap();
+                assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgba8(), *img);
+                u16::from_le_bytes([bytes[28], bytes[29]])
+            })
+            .collect();
+        assert_eq!(bits_per_pixel, [1, 32, 4, 8, 24, 32, 1]);
+    }
+
+    #[test]
+    fn tiff_is_deflate_compressed_and_exact() {
+        for img in layout_samples() {
+            let bytes = encode_image(&img, OutputFormat::Tiff, &ExportOptions::default()).unwrap();
+            assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgba8(), img);
+            assert!(bytes.len() < img.as_raw().len());
+        }
     }
 
     #[test]

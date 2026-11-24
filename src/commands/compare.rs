@@ -221,7 +221,11 @@ pub(crate) fn handle_compare(args: &CompareArgs, as_json: bool) -> Result<()> {
         sheet_dims = [sheet.width(), sheet.height()];
         if let Some(sheet_path) = &args.output {
             let fmt = OutputFormat::infer_from_path(sheet_path);
-            let bytes = encode_image(&sheet, fmt, &ExportOptions::default())?;
+            let export = ExportOptions {
+                optimize: base_recipe.export.optimize,
+                ..ExportOptions::default()
+            };
+            let bytes = encode_image(&sheet, fmt, &export)?;
             write_output_file(sheet_path, &bytes)?;
         }
         Some(sheet)
@@ -308,6 +312,7 @@ fn build_compare_variants(
                 if args.input.is_none() && args.pattern.is_some() {
                     rec.strip_photo_prep();
                 }
+                rec.export.optimize |= base.export.optimize;
                 Ok((rec.preset.clone().unwrap_or_else(|| name.clone()), rec))
             })
             .collect();

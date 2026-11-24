@@ -497,11 +497,11 @@ pub fn build_capabilities() -> CapabilitiesManifest {
             },
             NamedDescription {
                 id: OutputFormat::Bmp.id(),
-                description: "Uncompressed BMP",
+                description: "BMP (1/4/8-bit palette when opaque with <=256 colors, else 24/32-bit)",
             },
             NamedDescription {
                 id: OutputFormat::Tiff.id(),
-                description: "Archival TIFF",
+                description: "Deflate-compressed lossless TIFF",
             },
             NamedDescription {
                 id: OutputFormat::Svg.id(),
@@ -653,6 +653,13 @@ pub fn build_capabilities() -> CapabilitiesManifest {
                 range: "true | false",
                 default: "false",
                 effect: "Classic Amiga/VGA palette color cycling across animation frames",
+            },
+            ParameterRange {
+                flag: "--optimize",
+                value_type: "bool",
+                range: "true | false",
+                default: "false",
+                effect: "Smallest lossless PNG/APNG/spritesheet via palette-order and filter search plus Zopfli (encodes several times slower)",
             },
         ],
         default_recipe: DitherRecipe::default(),

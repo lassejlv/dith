@@ -243,6 +243,10 @@ pub struct DitherFlags {
     /// Display height in terminal rows when using --view or --format kitty.
     #[arg(long)]
     pub view_rows: Option<u32>,
+
+    /// Spend extra CPU for the smallest lossless PNG/APNG (palette, filter, and Zopfli search).
+    #[arg(long)]
+    pub optimize: bool,
 }
 
 impl DitherFlags {
@@ -411,6 +415,9 @@ impl DitherFlags {
         }
         if let Some(vr) = self.view_rows {
             recipe.export.view_rows = Some(vr);
+        }
+        if self.optimize {
+            recipe.export.optimize = true;
         }
 
         recipe.validate()?;
