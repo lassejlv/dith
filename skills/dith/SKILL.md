@@ -71,8 +71,8 @@ Start from a preset, then override individual flags. Explicit flags always win o
 
 The format is inferred from the `-o` extension; pass `--format` to override it.
 
-- **PNG** (default): lossless and pixel-exact, saved as an indexed PNG at the smallest bit depth the palette allows. The right choice almost always, and usually the smallest file.
-- **WebP**: lossless only, and typically 2–3× larger than dith's PNG for dithered output. **JPEG** destroys dither patterns, so never use it for dithered output unless the user insists.
+- **PNG** (default): lossless and pixel-exact, saved as an indexed PNG at the smallest bit depth the palette allows. The right choice almost always; only lossless WebP is smaller.
+- **WebP**: lossless only, palette-indexed, and typically 2–20% smaller than dith's PNG for dithered output (biggest gains on ordered dithers and 3+ color palettes), but slower to encode: up to about a second for a 1200×800 image with more than 16 colors. **JPEG** destroys dither patterns, so never use it for dithered output unless the user insists.
 - **SVG**: `--svg-shape rect` (run-length merged rectangles, smallest), `circle` (halftone dots), or `dot` (inset dots). `--svg-skip-bg` drops the dominant background color for overlays. SVG grows with pixel count, and circles are much larger than rects, so keep `--max-dim` around 120–320.
 - **Terminal text**: `--format braille|ascii` with `--text-width N`. `-o` is optional and the text goes to stdout.
 - **Stdin/stdout**: pass `-` as input or as `-o -`.

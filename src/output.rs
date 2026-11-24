@@ -224,28 +224,25 @@ pub fn encode_image(
         OutputFormat::Braille => Ok(render_braille(img, export.text_width).into_bytes()),
         OutputFormat::Ascii => Ok(render_ascii(img, export.text_width).into_bytes()),
         OutputFormat::Png => encode_png_bytes(img),
-        OutputFormat::Webp
-        | OutputFormat::Jpeg
-        | OutputFormat::Gif
-        | OutputFormat::Bmp
-        | OutputFormat::Tiff => {
+        OutputFormat::Webp => crate::webp::encode_lossless(img),
+        OutputFormat::Jpeg | OutputFormat::Gif | OutputFormat::Bmp | OutputFormat::Tiff => {
             let dyn_img = if matches!(format, OutputFormat::Jpeg) {
                 DynamicImage::ImageRgba8(img.clone()).to_rgb8().into()
             } else {
                 DynamicImage::ImageRgba8(img.clone())
             };
             let img_fmt = match format {
-                OutputFormat::Webp => ImageFormat::WebP,
                 OutputFormat::Jpeg => ImageFormat::Jpeg,
                 OutputFormat::Gif => ImageFormat::Gif,
                 OutputFormat::Bmp => ImageFormat::Bmp,
                 OutputFormat::Tiff => ImageFormat::Tiff,
                 OutputFormat::Png
+                | OutputFormat::Webp
                 | OutputFormat::Svg
                 | OutputFormat::Kitty
                 | OutputFormat::Braille
                 | OutputFormat::Ascii => {
-                    unreachable!("PNG and text/terminal formats handled above")
+                    unreachable!("PNG, WebP, and text/terminal formats handled above")
                 }
             };
             let mut cursor = Cursor::new(Vec::new());
