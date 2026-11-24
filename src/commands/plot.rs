@@ -636,7 +636,13 @@ pub(crate) fn handle_plot(args: &PlotArgs, as_json: bool) -> Result<()> {
             "dith {} plot: weighted Voronoi stippling",
             env!("CARGO_PKG_VERSION")
         ),
-        format!("source: {source_label}"),
+        format!(
+            "source: {}",
+            std::path::Path::new(&source_label).file_name().map_or_else(
+                || source_label.clone(),
+                |name| name.to_string_lossy().into_owned()
+            )
+        ),
         format!(
             "paper: {} {}x{}mm {}, margin {}mm, fit {}",
             paper.name,

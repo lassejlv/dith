@@ -1,9 +1,9 @@
 //! Image resizing, tonal adjustment, sharpening/blurring, and alpha handling before dithering.
 
+use crate::par::prelude::*;
 use clap::ValueEnum;
 use image::imageops::{self, FilterType};
 use image::{Rgba, RgbaImage};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::{Rgb, linear_to_srgb_u8, srgb_u8_to_linear};

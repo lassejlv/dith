@@ -353,8 +353,8 @@
     },
     "plot/photo-svg": {
       "command": "dith plot tests/golden/fixtures/photo.png -o plot-photo-svg.svg -n 600 --paper a6 --edges 0.8",
-      "bytes": 9822,
-      "sha256": "7af1285dce851fcde574497f0fe64771722acea8c09d8e7550dcd3e96d6d01d6"
+      "bytes": 9792,
+      "sha256": "839e959041069a7a764a54663b86d42f341dbc249f37dc410d0cefe0a230feb5"
     },
     "plot/sphere-gcode": {
       "command": "dith plot sphere -o plot-sphere-gcode.gcode -n 400 --paper a6 --dot circle",
