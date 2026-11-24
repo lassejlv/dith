@@ -1229,21 +1229,22 @@ fn threshold_dither(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) ->
 /// exponential-decay error history queue (queue length 16, ratio 1/16).
 fn riemersma_dither(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) -> RgbaImage {
     const QUEUE_LEN: usize = 16;
-    const RATIO: f32 = 1.0 / 16.0;
+    // Error-queue weights `(1/16)^(1 - i/15)`, oldest first; written out rather than computed with
+    // `powf` so every platform diffuses identical errors along the curve.
+    #[rustfmt::skip]
+    const WEIGHTS: [f32; QUEUE_LEN] = [
+        0.0625, 0.07518906, 0.090454325, 0.108818814, 0.13091175, 0.15749015, 0.18946455,
+        0.22793064, 0.27420628, 0.329877, 0.3968503, 0.47742084, 0.5743492, 0.6909565,
+        0.8312379, 1.0,
+    ];
 
     let w = img.width();
     let h = img.height();
     let max_dim = w.max(h).max(1);
     let side = max_dim.next_power_of_two();
     let total = u64::from(side) * u64::from(side);
-    let mut weights = [0.0f32; QUEUE_LEN];
-    let mut weight_sum = 0.0f32;
-    for (i, slot) in weights.iter_mut().enumerate() {
-        let exp = (i as f32) / ((QUEUE_LEN - 1) as f32);
-        let w_i = RATIO.powf(1.0 - exp);
-        *slot = w_i;
-        weight_sum += w_i;
-    }
+    let mut weights = WEIGHTS;
+    let weight_sum: f32 = weights.iter().sum();
     for slot in &mut weights {
         *slot /= weight_sum;
     }
@@ -1408,20 +1409,36 @@ fn blue_noise_64() -> &'static [f32] {
     BLUE_NOISE.get_or_init(|| generate_void_and_cluster(64))
 }
 
+/// Void-and-Cluster Gaussian energy weight by squared distance `d2`: `exp(-d2 / (2 * 1.9^2))`.
+/// Written out rather than computed with `exp`, because platform libms round `expf` differently in
+/// the last bit and a 1-ULP change reorders the whole blue-noise mask.
+#[rustfmt::skip]
+const VOID_AND_CLUSTER_WEIGHTS: [f32; 51] = [
+    1.0, 0.87065965, 0.7580482, 0.66000193, 0.57463706, 0.5003133, 0.43560258,
+    0.37926158, 0.33020774, 0.28749856, 0.2503134, 0.21793777, 0.18974961, 0.16520733,
+    0.14383936, 0.12523513, 0.10903715, 0.09493426, 0.08265542, 0.07196475, 0.06265679,
+    0.054552734, 0.04749687, 0.041353602, 0.036004916, 0.031348024, 0.027293462, 0.023763314,
+    0.020689761, 0.018013738, 0.015683835, 0.013655278, 0.011889101, 0.010351362, 0.009012514,
+    0.0078468295, 0.0068319184, 0.0059482763, 0.0051789246, 0.0045090793, 0.0039258734, 0.0034181,
+    0.0029760008, 0.002591084, 0.0022559527, 0.001964167, 0.0017101204, 0.001488933, 0.001296354,
+    0.0011286832, 0.0009826986,
+];
+
 /// Fast incremental Ulichney Void-and-Cluster generator producing a genuinely tileable
 /// `size x size` blue-noise threshold array in `[0, 1)`.
 fn generate_void_and_cluster(size: usize) -> Vec<f32> {
     const RADIUS: i32 = 5;
-    const SIGMA: f32 = 1.9;
     let n = size * size;
 
-    // Precompute truncated Gaussian kernel weights.
+    // Truncated Gaussian kernel weights.
     let mut offsets: Vec<(i32, i32, f32)> = Vec::new();
-    let denom = 2.0 * SIGMA * SIGMA;
     for dy in -RADIUS..=RADIUS {
         for dx in -RADIUS..=RADIUS {
-            let d2 = (dx * dx + dy * dy) as f32;
-            offsets.push((dx, dy, (-d2 / denom).exp()));
+            offsets.push((
+                dx,
+                dy,
+                VOID_AND_CLUSTER_WEIGHTS[(dx * dx + dy * dy) as usize],
+            ));
         }
     }
 
@@ -1441,7 +1458,7 @@ fn generate_void_and_cluster(size: usize) -> Vec<f32> {
     let mut energy = vec![0.0f32; n];
     let mut placed = 0usize;
     while placed < init_ones {
-        let idx = (rng.next_u64() as usize) % n;
+        let idx = (rng.next_u64() % n as u64) as usize;
         if !pattern[idx] {
             pattern[idx] = true;
             add_energy(&mut energy, idx % size, idx / size, 1.0);
@@ -1590,5 +1607,16 @@ mod tests {
         assert_eq!(mask.len(), 64 * 64);
         let mean: f32 = mask.iter().sum::<f32>() / mask.len() as f32;
         assert!((mean - 0.5).abs() < 1e-4, "unexpected mean {mean}");
+    }
+
+    #[test]
+    fn void_and_cluster_weights_match_gaussian() {
+        for (d2, &w) in VOID_AND_CLUSTER_WEIGHTS.iter().enumerate() {
+            let exact = (-(d2 as f64) / (2.0 * 1.9f64 * 1.9)).exp();
+            assert!(
+                (f64::from(w) - exact).abs() <= exact * 1e-6,
+                "d2 {d2}: {w} vs {exact}"
+            );
+        }
     }
 }

@@ -1,0 +1,490 @@
+{
+  "_regenerate": "DITH_UPDATE_GOLDEN=1 cargo test --test golden",
+  "cases": {
+    "algorithm/atkinson": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-atkinson.png -a atkinson -p cobalt-sand",
+      "bytes": 954,
+      "sha256": "a2bfca90a0b81637a2bdff373cb04f51d71b4eeb3e97da3640d3d3401f9256e9"
+    },
+    "algorithm/bayer16": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-bayer16.png -a bayer16 -p cobalt-sand",
+      "bytes": 753,
+      "sha256": "feb034a7a8ae2ee63baf8da96ae7beeaa8a2abb7d7af4f793f286b3eeca7c5fa"
+    },
+    "algorithm/bayer2": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-bayer2.png -a bayer2 -p cobalt-sand",
+      "bytes": 504,
+      "sha256": "250aed3e00c9d8126724af3e2bbceb56a48e9a7eff5403bc40ac0c07af1e9f0e"
+    },
+    "algorithm/bayer4": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-bayer4.png -a bayer4 -p cobalt-sand",
+      "bytes": 708,
+      "sha256": "9faa031d6df04b65b2c9a640c4d33e68e538517f91328daf503e7a2dac8b8773"
+    },
+    "algorithm/bayer8": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-bayer8.png -a bayer8 -p cobalt-sand",
+      "bytes": 752,
+      "sha256": "ccc2485617355e7be37247408c5c3d24ae5464eb61907b4462fc9f38f2578378"
+    },
+    "algorithm/blue-noise": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-blue-noise.png -a blue-noise -p cobalt-sand",
+      "bytes": 1464,
+      "sha256": "2ac4318517d771a0c402a00293399e2de7f6daf51553a864322bd6b5e6f647e8"
+    },
+    "algorithm/burkes": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-burkes.png -a burkes -p cobalt-sand",
+      "bytes": 1056,
+      "sha256": "b502091554f43001b7209082bf85182e12dcba0485fb16b921175b6bd3477853"
+    },
+    "algorithm/clustered-dot": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-clustered-dot.png -a clustered-dot -p cobalt-sand",
+      "bytes": 655,
+      "sha256": "00283605d156fb5481df8c52439287ed9981ac842b132612da043d1a4c914343"
+    },
+    "algorithm/crosshatch": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-crosshatch.png -a crosshatch -p cobalt-sand",
+      "bytes": 909,
+      "sha256": "ccedae1af2b7fd1abb060a984375339ced6b7639fe49774eed13035d94a19ff6"
+    },
+    "algorithm/diagonal-lines": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-diagonal-lines.png -a diagonal-lines -p cobalt-sand",
+      "bytes": 864,
+      "sha256": "1cff417a4eeb330f0272fef47d169fa4bcb3c0394bf21f07fad6a2df0b2b95b5"
+    },
+    "algorithm/floyd-steinberg": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-floyd-steinberg.png -a floyd-steinberg -p cobalt-sand",
+      "bytes": 1157,
+      "sha256": "a0b0c112008f3ebee2aa95d37a55b485011fafbad1f2681535ffe5c9a0bef076"
+    },
+    "algorithm/halftone": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-halftone.png -a halftone -p cobalt-sand",
+      "bytes": 764,
+      "sha256": "9e62365ead43cdbaecb74e930e963edadde90be9d733fa9a7e04d7f82fe0cf45"
+    },
+    "algorithm/horizontal-lines": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-horizontal-lines.png -a horizontal-lines -p cobalt-sand",
+      "bytes": 585,
+      "sha256": "692cc1bb48e789043f828dd39ca7cc5fc23cfd82371fc8367f1f20d20bd2b6b4"
+    },
+    "algorithm/ign": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-ign.png -a ign -p cobalt-sand",
+      "bytes": 970,
+      "sha256": "81d7d356649bcf0ef29d5942d9959d0a42f6354e37849b26af47b90d55577e29"
+    },
+    "algorithm/jarvis-judice-ninke": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-jarvis-judice-ninke.png -a jarvis-judice-ninke -p cobalt-sand",
+      "bytes": 971,
+      "sha256": "4ddd77b5bb1d09c2f5aeead3645571ca1e4ba3d4cc66f97efd35f7b02d7684bc"
+    },
+    "algorithm/ostromoukhov": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-ostromoukhov.png -a ostromoukhov -p cobalt-sand",
+      "bytes": 1189,
+      "sha256": "2eaef1967fe4d67cc7d42a9c958dbd05c0b6e8e9c20fd6624ee5fc6119502d7e"
+    },
+    "algorithm/random": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-random.png -a random -p cobalt-sand",
+      "bytes": 1481,
+      "sha256": "990e031fc0478e1eade4354a9e8f9c37800e39c5fdbf73b6b2f62fbd5fbdd581"
+    },
+    "algorithm/riemersma": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-riemersma.png -a riemersma -p cobalt-sand",
+      "bytes": 958,
+      "sha256": "59d64da91308c355789d4620bc07af256b681fa0d399eb871a4253ccf0a8854d"
+    },
+    "algorithm/sierra": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-sierra.png -a sierra -p cobalt-sand",
+      "bytes": 973,
+      "sha256": "2f27addf81732d16ee0e43ac8aa0ccf9d1410ff7e35c85e7390eb60847240c39"
+    },
+    "algorithm/sierra-lite": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-sierra-lite.png -a sierra-lite -p cobalt-sand",
+      "bytes": 1169,
+      "sha256": "eac9e2e6bb1d8129ce634057d64ada023776225241ef11604d554cc61e848385"
+    },
+    "algorithm/sierra-two-row": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-sierra-two-row.png -a sierra-two-row -p cobalt-sand",
+      "bytes": 976,
+      "sha256": "c68ee437e1417732e92dde07cdfb7450ae995260f113967898b45352ae62bcef"
+    },
+    "algorithm/stucki": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-stucki.png -a stucki -p cobalt-sand",
+      "bytes": 971,
+      "sha256": "adea656bfc21ec679a90ccd48273ed7228db9f2fe81f493e8f389da52a1597fa"
+    },
+    "algorithm/threshold": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-threshold.png -a threshold -p cobalt-sand",
+      "bytes": 597,
+      "sha256": "c2b87a6f06ac8d4d31f9efedad503f2e53c180e4f46ec6b77746cdfe201fa748"
+    },
+    "algorithm/vertical-lines": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o algorithm-vertical-lines.png -a vertical-lines -p cobalt-sand",
+      "bytes": 627,
+      "sha256": "8fe66f3add97ac41f34e8b4ecd61dcbdd14259b7bfb2bbed5f54762c86341638"
+    },
+    "animate/checkerboard-apng-optimize": {
+      "command": "dith animate -o animate-checkerboard-apng-optimize.apng --canvas-width 64 --canvas-height 48 --frames 6 --pattern checkerboard -a ign -p cga --temporal grain --optimize",
+      "bytes": 3565,
+      "sha256": "943ceb5d2247e4dbe31f99967f5afc656b57ad06a7de394219398e8959c97e79"
+    },
+    "animate/mesh-gif-boil": {
+      "command": "dith animate -o animate-mesh-gif-boil.gif --canvas-width 64 --canvas-height 48 --frames 6 --pattern mesh -a blue-noise -p cobalt-sand --temporal boil --screen-drift 1,0",
+      "bytes": 4548,
+      "sha256": "0df4ae913867c2155540dbd1d96570c369c249180779bec8bc9e7783757633bd"
+    },
+    "animate/noise-gif-sweep": {
+      "command": "dith animate -o animate-noise-gif-sweep.gif --canvas-width 64 --canvas-height 48 --frames 6 --pattern noise -a atkinson -p bw --sweep-bias -0.4..0.0 --sweep-mode pulse",
+      "bytes": 2414,
+      "sha256": "669c9d7f3b839d47882cd72f6d8b83ba38f524b23c5c3f5b3a3446672cd0399a"
+    },
+    "animate/photo-boil-apng": {
+      "command": "dith animate tests/golden/fixtures/photo.png -o animate-photo-boil-apng.apng --frames 4 --temporal boil -a stucki -p bw",
+      "bytes": 3060,
+      "sha256": "682a7a9ff359433c3bfbb4f180cf9e386d78ece031753ade3bfacb77460f3d9b"
+    },
+    "animate/photo-boil-gif": {
+      "command": "dith animate tests/golden/fixtures/photo.png -o animate-photo-boil-gif.gif --frames 4 --temporal boil --preset film-stipple",
+      "bytes": 5801,
+      "sha256": "ce8ec2f1aaccf82c42e5cc0eb2a8e7c280ea78ad87564c5a52d62a16cf670fdc"
+    },
+    "animate/plasma-spritesheet": {
+      "command": "dith animate -o animate-plasma-spritesheet.png --canvas-width 64 --canvas-height 48 --frames 6 --pattern plasma --preset vapor-mesh --anim-format spritesheet --sheet-cols 3",
+      "bytes": 1040,
+      "sha256": "89f78e2a5ddf0eebc88e753bd3d6749aca7820b85b254617dd3cf7e6e0bdbf7b"
+    },
+    "animate/rings-apng-cycle": {
+      "command": "dith animate -o animate-rings-apng-cycle.apng --canvas-width 64 --canvas-height 48 --frames 6 --pattern rings -a bayer8 -p pico8 --cycle-palette --ping-pong",
+      "bytes": 8422,
+      "sha256": "969514b1c573156d00c9c5f6b8296d4690466646ca557b1a9c5a41a16f299a58"
+    },
+    "animate/sphere-gif": {
+      "command": "dith animate -o animate-sphere-gif.gif --canvas-width 64 --canvas-height 48 --frames 6 --pattern sphere --preset risograph",
+      "bytes": 1038,
+      "sha256": "903a4da0ba4fa6de37a5582a734ee9b9fa67b601bf5ec28d7ba646a638e49b52"
+    },
+    "animate/waves-apng": {
+      "command": "dith animate -o animate-waves-apng.apng --canvas-width 64 --canvas-height 48 --frames 6 --pattern waves -a bayer4 -p gameboy --easing ease-in-out",
+      "bytes": 3220,
+      "sha256": "12fe1f4ebc632f046e0ca00d288fe8554a658255e37bd5ded63775a313e3002d"
+    },
+    "auto-palette/16": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o auto-palette-16.png --auto-palette 16 --seed 7",
+      "bytes": 1956,
+      "sha256": "577acdc7acf32443964aa6b87f476ad8cb4dc3c21ddcf49b48fd6c9a7bedd1f3"
+    },
+    "auto-palette/2": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o auto-palette-2.png --auto-palette 2 --seed 7",
+      "bytes": 282,
+      "sha256": "51e2473cb22640f90008a0184f86ff215ebcf856cdb7695deefb0a75ca802f05"
+    },
+    "auto-palette/6": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o auto-palette-6.png --auto-palette 6 --seed 7",
+      "bytes": 1172,
+      "sha256": "3232aaacbfb0d18d977999e8b987d8bc10e9ea95a5537f48b37264a753776d44"
+    },
+    "color-space/linear": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o color-space-linear.png -a floyd-steinberg -p pico8 --color-space linear",
+      "bytes": 2258,
+      "sha256": "92e0dd9c6579596cc622dda11000a0166aa176401cf598cd1044166566c6f755"
+    },
+    "color-space/oklab": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o color-space-oklab.png -a floyd-steinberg -p pico8 --color-space oklab",
+      "bytes": 2314,
+      "sha256": "124ead9a9b3409429760e0c75ce07ddffd6dadbc166e0ff3c5c3c02f83a1b9c1"
+    },
+    "color-space/srgb": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o color-space-srgb.png -a floyd-steinberg -p pico8 --color-space srgb",
+      "bytes": 2491,
+      "sha256": "6a528a774a41c6bffb83bd7cf086d252c619f278813422d6b4beb09775fe799e"
+    },
+    "compare/algorithms": {
+      "command": "dith compare tests/golden/fixtures/photo.png -o compare-algorithms.png --algorithms floyd-steinberg,atkinson,bayer4,blue-noise -p bw --tile-max-dim 96",
+      "bytes": 3731,
+      "sha256": "8259a366931172039a602b570400dd2e3c6986b7df2ab8c6286a8bc6fcb7fedc"
+    },
+    "compare/palettes-pattern": {
+      "command": "dith compare --pattern sphere -o compare-palettes-pattern.png --palettes bw,gameboy,pico8 -a bayer4 --tile-max-dim 64 --light",
+      "bytes": 1550,
+      "sha256": "52cd0a5945fabd7102b1231caa721c23dcfe074e90929d17861bf7ba9f23d26f"
+    },
+    "compare/presets": {
+      "command": "dith compare tests/golden/fixtures/photo.png -o compare-presets.png --presets gameboy,risograph,lo-fi-photo --tile-max-dim 80",
+      "bytes": 1763,
+      "sha256": "9e967ea9d04c1284af756c5abfdfa02508c0db91aec0a708c3f8aa854dd2f4ce"
+    },
+    "format/ascii": {
+      "command": "dith apply tests/golden/fixtures/photo.png --preset mac-classic -f ascii --text-width 48",
+      "bytes": 882,
+      "sha256": "d0c79c36331ba252f9ac842c7cb57afe5b89c6462c953142bb618e0d0ef28ee3"
+    },
+    "format/bmp": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-bmp.bmp --preset risograph-duo",
+      "bytes": 3526,
+      "sha256": "621f9cd578855ce59633b1a9e2d2fb6c71e497d417b5d5f2506945b8a2308b66"
+    },
+    "format/braille": {
+      "command": "dith apply tests/golden/fixtures/photo.png --preset mac-classic -f braille --text-width 40",
+      "bytes": 1815,
+      "sha256": "a337bb11f89f2dde3cff4aca2f0214a34d35e9cceb848652fbb76faa7f5914ea"
+    },
+    "format/gif": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-gif.gif --preset risograph-duo",
+      "bytes": 1013,
+      "sha256": "fb09ad0714e7e94876fc45be8b60d9dbaae389907794b4f00a99273b462417ae"
+    },
+    "format/jpeg": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-jpeg.jpg --preset risograph-duo",
+      "bytes": 5313,
+      "sha256": "118ffccddd7e71be8eb91bcd947ed8615e9f378cf775a0c546633ca0d419751e"
+    },
+    "format/png": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-png.png --preset risograph-duo",
+      "bytes": 486,
+      "sha256": "876a27ff92bf5873c048c9735060ad3a133a2f2a1060c7e072b1209a0191a2be"
+    },
+    "format/png-optimize": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-png-optimize.png --preset risograph-duo --optimize",
+      "bytes": 464,
+      "sha256": "9edbc54d5e23525f6041ab06c6b9804c0d4288eebbb25af8a379a388d5c99b94"
+    },
+    "format/png-optimize-pico8": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-png-optimize-pico8.png --preset pico8 --optimize",
+      "bytes": 547,
+      "sha256": "06aee271229b0875b94bffff4617a2f2f63fb56c86e4241b7d0bd8d92e751712"
+    },
+    "format/svg-circle": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-svg-circle.svg --preset risograph-duo --svg-shape circle",
+      "bytes": 195444,
+      "sha256": "c181104fd7fe0cf1784c865260a95948a419180b12dad928446e636916353482"
+    },
+    "format/svg-dot": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-svg-dot.svg --preset risograph-duo --svg-shape dot --svg-skip-bg",
+      "bytes": 195398,
+      "sha256": "b74749474d1b5665cc2ab5fa7391479a19b27a2ff8c8cac961fa0ae4c7befd07"
+    },
+    "format/svg-rect": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-svg-rect.svg --preset risograph-duo --svg-shape rect",
+      "bytes": 9999,
+      "sha256": "cdb6b83ef62a3b05dbbd0f355a0efdd23067bd8dfef3da38fe52c6ffc79cb955"
+    },
+    "format/tiff": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-tiff.tiff --preset risograph-duo",
+      "bytes": 876,
+      "sha256": "74048cde18c6ca0dd9031bdcde910317c2c75c753f529c16701e0f82f08d5630"
+    },
+    "format/webp": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-webp.webp --preset risograph-duo",
+      "bytes": 416,
+      "sha256": "1693442994af8435126551aa33d398c0d010faa8d43c4be8769989f49b2b608f"
+    },
+    "format/webp-many-colors": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o format-webp-many-colors.webp --auto-palette 12 -a atkinson",
+      "bytes": 1136,
+      "sha256": "3ac64ab3ceb2d8df8873cebd6de626f1b8216008114f7eea3f1add5d4e29f65c"
+    },
+    "generate/checkerboard": {
+      "command": "dith generate checkerboard -o generate-checkerboard.png --canvas-width 160 --canvas-height 120",
+      "bytes": 1574,
+      "sha256": "1246fcb0528b6a7e20187f60a635857f9515a1b4cbc98889203969d9aae5c2f3"
+    },
+    "generate/linear-gradient": {
+      "command": "dith generate linear-gradient -o generate-linear-gradient.png --canvas-width 160 --canvas-height 120",
+      "bytes": 1795,
+      "sha256": "04cc31242eadeb398bbb39dc4a568b6995219d3cabfc8cc6e29e45babbe28450"
+    },
+    "generate/mesh": {
+      "command": "dith generate mesh -o generate-mesh.png --canvas-width 160 --canvas-height 120",
+      "bytes": 1629,
+      "sha256": "0334a88cc18c389dd64de1dd51bb622ca786ce1d5fdf249363484ac3123c035c"
+    },
+    "generate/noise": {
+      "command": "dith generate noise -o generate-noise.png --canvas-width 160 --canvas-height 120",
+      "bytes": 1922,
+      "sha256": "70e0215ec26450cbd148b4fe7be139ee8fb75ee3e2e79fa43998fc41d6da32a1"
+    },
+    "generate/plasma": {
+      "command": "dith generate plasma -o generate-plasma.png --canvas-width 160 --canvas-height 120",
+      "bytes": 1804,
+      "sha256": "f724086a356ff9b1281e4e6048ee8699fcefeb160fd3db477239e47dd2c2affe"
+    },
+    "generate/radial-gradient": {
+      "command": "dith generate radial-gradient -o generate-radial-gradient.png --canvas-width 160 --canvas-height 120",
+      "bytes": 1590,
+      "sha256": "4cf53f8f0d3347397289df7d34afbfbdc898a66622052c8f882094d0ff0232ea"
+    },
+    "generate/rings": {
+      "command": "dith generate rings -o generate-rings.png --canvas-width 160 --canvas-height 120",
+      "bytes": 1776,
+      "sha256": "89f94a4d8d4eb9447b1e9a1e808e2a14feea630fcc321226c2cbcaebd82be0f0"
+    },
+    "generate/sphere": {
+      "command": "dith generate sphere -o generate-sphere.png --canvas-width 160 --canvas-height 120",
+      "bytes": 1158,
+      "sha256": "70cc858cd122ae0a31c0836a5e22615133c66d64854b7c4f7f889abc89d65056"
+    },
+    "generate/sphere-styled": {
+      "command": "dith generate sphere -o generate-sphere-styled.png --canvas-width 80 --canvas-height 80 --preset risograph-duo --angle 60 --frequency 1.7 --stops #0f172a,#38bdf8,#f8fafc",
+      "bytes": 405,
+      "sha256": "4a0a7cd7cf717121aea029ab141a62a6b92854611fae474ed9a4e61163a621ab"
+    },
+    "generate/waves": {
+      "command": "dith generate waves -o generate-waves.png --canvas-width 160 --canvas-height 120",
+      "bytes": 1872,
+      "sha256": "b55881840ca6eda888f3a194121476e07e566a6e27c32235859645402f09e9f7"
+    },
+    "preprocess/alpha-dither": {
+      "command": "dith apply tests/golden/fixtures/alpha.png -o preprocess-alpha-dither.png -a floyd-steinberg -p gray8 --alpha-mode dither",
+      "bytes": 298,
+      "sha256": "82a31c576628e2a37b64c8dc07ffd7e46c6969ad59e0f8830491b09e89748fb9"
+    },
+    "preprocess/alpha-flatten": {
+      "command": "dith apply tests/golden/fixtures/alpha.png -o preprocess-alpha-flatten.png -a floyd-steinberg -p gray8 --alpha-mode flatten --background #ffcc00",
+      "bytes": 244,
+      "sha256": "b1ad2d53a3729789cdfc6045a9bedc8b29c6534855d7a54ed7c59132129b9eb2"
+    },
+    "preprocess/alpha-preserve": {
+      "command": "dith apply tests/golden/fixtures/alpha.png -o preprocess-alpha-preserve.png -a floyd-steinberg -p gray8 --alpha-mode preserve",
+      "bytes": 478,
+      "sha256": "2ca72512ded2136ecb2380496825f3b22c59402d1ffbb8469a362ee5f4cf150d"
+    },
+    "preprocess/alpha-threshold": {
+      "command": "dith apply tests/golden/fixtures/alpha.png -o preprocess-alpha-threshold.png -a floyd-steinberg -p gray8 --alpha-mode threshold",
+      "bytes": 238,
+      "sha256": "0472cfb6b2e767ac0de6c14f3d08fc2d8c8e5f9c1ba35f3dc1067808cfc4a1f7"
+    },
+    "preprocess/blur": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preprocess-blur.png -a floyd-steinberg -p gray8 --blur 1.5",
+      "bytes": 1004,
+      "sha256": "48dd044eb2138ff60c7c9e383b1231464083b2610e28697e3e1dc8ece11db6d3"
+    },
+    "preprocess/noise-bias": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preprocess-noise-bias.png -a floyd-steinberg -p gray8 --noise 0.2 --bias 0.1 --seed 3 --strength 0.8",
+      "bytes": 1727,
+      "sha256": "2df2744d05654167a5a750f90d708c2d19fce610aa1dae9b9b780013d78d07a0"
+    },
+    "preprocess/pixel-size": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preprocess-pixel-size.png -a floyd-steinberg -p gray8 --pixel-size 4",
+      "bytes": 299,
+      "sha256": "cbf33db616328f1b68e5ae6eb7b1a894aaac55c59d5d125fb564b2f6421c1ccf"
+    },
+    "preprocess/resize-contain": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preprocess-resize-contain.png -a floyd-steinberg -p gray8 --width 61 --height 40",
+      "bytes": 483,
+      "sha256": "82ef61a16b601f9c23ab27318a0708457206be1df721b956534b68f5bcb8a77c"
+    },
+    "preprocess/resize-cover": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preprocess-resize-cover.png -a floyd-steinberg -p gray8 --width 50 --height 50 --fit cover",
+      "bytes": 537,
+      "sha256": "96f8f6c7583e7501dd6650c0f80ad2d1a6c31f61254ddc78bc78e619e64434a4"
+    },
+    "preprocess/scale-up": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preprocess-scale-up.png -a floyd-steinberg -p gray8 --scale 1.5",
+      "bytes": 2158,
+      "sha256": "ec7b8e567bafe3028df905d079d22b3abd8584cbd45241fe4326f462159d8048"
+    },
+    "preprocess/sharpen": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preprocess-sharpen.png -a floyd-steinberg -p gray8 --sharpen 1.2 --grayscale",
+      "bytes": 1628,
+      "sha256": "4c3b978638de97798e65f1ea7641431070086f712d6449054bbacc066d8b40b1"
+    },
+    "preprocess/tonal": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preprocess-tonal.png -a floyd-steinberg -p gray8 --gamma 0.8 --contrast 0.2 --brightness -0.1 --saturation 1.4 --auto-levels --invert",
+      "bytes": 928,
+      "sha256": "36732d85e327f90dda6548b201fa63f365ebc377c1dd1f5751cd4c9d319a2ba1"
+    },
+    "preset-large/editorial-print": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-large-editorial-print.png --preset editorial-print --scale 4",
+      "bytes": 7770,
+      "sha256": "dfa485ff5c675a6c7282080b376ee45fe1a04fd2c0a10a922431db024b0d9dcb"
+    },
+    "preset-large/film-stipple": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-large-film-stipple.png --preset film-stipple --scale 4",
+      "bytes": 13221,
+      "sha256": "6752a39cdf609b65f1d9969b62fc3ac5f1129abc86ef8c75ec3d337c84c2c211"
+    },
+    "preset-large/lo-fi-photo": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-large-lo-fi-photo.png --preset lo-fi-photo --scale 4",
+      "bytes": 4762,
+      "sha256": "e0fe7cd10f716f53372881bacc56b15d3727a8ecfd2ae16912aacc849d9d3ee5"
+    },
+    "preset-large/risograph": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-large-risograph.png --preset risograph --scale 4",
+      "bytes": 8121,
+      "sha256": "4f209f39f10768f5cf00d291b27c941543445a618c03ecf3b96eaff27c02318e"
+    },
+    "preset/blueprint": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-blueprint.png --preset blueprint",
+      "bytes": 791,
+      "sha256": "26fa0c0e5fe69f1e7f1484bd40a38a16ea87811b371365a9b33fc9657250cb2e"
+    },
+    "preset/crt-amber": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-crt-amber.png --preset crt-amber",
+      "bytes": 413,
+      "sha256": "6321c541346ce957f3b6c2fd023ec2d46c1b3885a7114f1aa3b2bf4093db3929"
+    },
+    "preset/editorial-print": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-editorial-print.png --preset editorial-print",
+      "bytes": 719,
+      "sha256": "d9f1dd6647cffba164e0084d0a0295f8699f2e37e2a643ee881e74055551ad1d"
+    },
+    "preset/film-stipple": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-film-stipple.png --preset film-stipple",
+      "bytes": 1352,
+      "sha256": "cd3e18d7fd86ee0144ef49ff7c553c308e1c3ccecc3a29914e0f849b1f1bc132"
+    },
+    "preset/gameboy": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-gameboy.png --preset gameboy",
+      "bytes": 341,
+      "sha256": "52fe90b6eeab27b20a9c0f6cb924dea7fc238fa92a36c069abdc5c98e01ec8e5"
+    },
+    "preset/halftone-zine": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-halftone-zine.png --preset halftone-zine",
+      "bytes": 468,
+      "sha256": "7e8d0915b9e5c41f9163f41bf1d1db99c85aef28f0c50282448657322d939aa6"
+    },
+    "preset/lo-fi-photo": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-lo-fi-photo.png --preset lo-fi-photo",
+      "bytes": 575,
+      "sha256": "a706e8440f087aa3255840dd2584b88d34b849cdf943afa00a206a39d313cffc"
+    },
+    "preset/mac-classic": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-mac-classic.png --preset mac-classic",
+      "bytes": 807,
+      "sha256": "65c3ba0a8845f7933c554d5d26f466077e71e4df303721ea39fec008ea83885f"
+    },
+    "preset/phosphor": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-phosphor.png --preset phosphor",
+      "bytes": 331,
+      "sha256": "794f901088469748dcbecaf1c1fec00ac3e291c74ed12c31a1b15d92c75563b9"
+    },
+    "preset/pico8": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-pico8.png --preset pico8",
+      "bytes": 574,
+      "sha256": "40feda843f8c7af587956fb93e6e05366b950aa3f1ef8b4cf379e693dbc7cb9c"
+    },
+    "preset/risograph": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-risograph.png --preset risograph",
+      "bytes": 762,
+      "sha256": "b51f3f1fc5232fe51c76f6425b551210f6742830cb12f7a6e0230334f8c24065"
+    },
+    "preset/risograph-duo": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-risograph-duo.png --preset risograph-duo",
+      "bytes": 486,
+      "sha256": "876a27ff92bf5873c048c9735060ad3a133a2f2a1060c7e072b1209a0191a2be"
+    },
+    "preset/risograph-red": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-risograph-red.png --preset risograph-red",
+      "bytes": 776,
+      "sha256": "818988ac680b15cad4c25ede7a0d81bf6093246f0088a3c798dcb639d3b3fe3e"
+    },
+    "preset/vapor-mesh": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-vapor-mesh.png --preset vapor-mesh",
+      "bytes": 456,
+      "sha256": "f590ee5191968a6b01a2dad4c056f70e5c7913c69121dc9eb2441144e7af293f"
+    },
+    "preset/woodcut": {
+      "command": "dith apply tests/golden/fixtures/photo.png -o preset-woodcut.png --preset woodcut",
+      "bytes": 905,
+      "sha256": "1d30e72b585b9cc186d0d46a57a15dabe5caee91f5d7f8259f068ca09d83d151"
+    }
+  }
+}

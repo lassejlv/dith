@@ -99,3 +99,15 @@ dith animate rings -o rings-sheet.png --anim-format spritesheet --sheet-cols 6 -
 # 9. Parallel batch processing
 dith batch assets/*.png --out-dir ./dithered --preset brand-hero --json
 ```
+
+## Determinism
+
+The same inputs and flags produce byte-identical files on every supported platform. [`tests/golden.rs`](tests/golden.rs) renders a fixed corpus (every preset, algorithm, generator, and output format, plus animations, auto-palette, preprocessing, and contact sheets) from the small fixtures in `tests/golden/fixtures/` and compares SHA-256 hashes with `tests/golden/hashes.json`. CI runs it on Linux x86_64, Linux ARM, and macOS Apple Silicon.
+
+After an intentional output change, regenerate the hashes and commit them with the change:
+
+```bash
+DITH_UPDATE_GOLDEN=1 cargo test --test golden
+```
+
+A failing run lists every changed case with the command that reproduces it. Set `DITH_GOLDEN_BIN=/path/to/dith` to check another build, such as a release binary or an older version, against the same hashes.

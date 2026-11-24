@@ -10,7 +10,7 @@ description: >-
 
 # Dith
 
-`dith` is a deterministic dithering CLI built for agents. Every command takes `--json`, writes palette-exact output, and returns a machine-readable report. The same inputs and flags always produce byte-identical files.
+`dith` is a deterministic dithering CLI built for agents. Every command takes `--json`, writes palette-exact output, and returns a machine-readable report. The same inputs and flags always produce byte-identical files, on Linux and macOS alike.
 
 ## Setup
 
