@@ -16,3 +16,4 @@ pub mod preset;
 pub mod recipe;
 pub mod update;
 pub mod viewer;
+pub mod webp;

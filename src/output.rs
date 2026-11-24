@@ -228,26 +228,27 @@ pub fn encode_image(
         OutputFormat::Ascii => Ok(render_ascii(img, export.text_width).into_bytes()),
         OutputFormat::Png if export.optimize => encode_optimized_png_bytes(img),
         OutputFormat::Png => encode_png_bytes(img),
+        OutputFormat::Webp => crate::webp::encode_lossless(img),
         OutputFormat::Bmp => encode_bmp(img),
         OutputFormat::Tiff => encode_tiff(img),
-        OutputFormat::Webp | OutputFormat::Jpeg | OutputFormat::Gif => {
+        OutputFormat::Jpeg | OutputFormat::Gif => {
             let dyn_img = if matches!(format, OutputFormat::Jpeg) {
                 DynamicImage::ImageRgba8(img.clone()).to_rgb8().into()
             } else {
                 DynamicImage::ImageRgba8(img.clone())
             };
             let img_fmt = match format {
-                OutputFormat::Webp => ImageFormat::WebP,
                 OutputFormat::Jpeg => ImageFormat::Jpeg,
                 OutputFormat::Gif => ImageFormat::Gif,
                 OutputFormat::Png
+                | OutputFormat::Webp
                 | OutputFormat::Bmp
                 | OutputFormat::Tiff
                 | OutputFormat::Svg
                 | OutputFormat::Kitty
                 | OutputFormat::Braille
                 | OutputFormat::Ascii => {
-                    unreachable!("PNG, BMP, TIFF, and text/terminal formats handled above")
+                    unreachable!("PNG, WebP, BMP, TIFF, and text/terminal formats handled above")
                 }
             };
             let mut cursor = Cursor::new(Vec::new());
