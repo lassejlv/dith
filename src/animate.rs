@@ -30,6 +30,7 @@ use crate::palette::{Palette, extract_adaptive_palette, extract_adaptive_palette
 use crate::par::prelude::*;
 use crate::preprocess::{finalize_image, prepare_image};
 use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError};
+use crate::webp::{AnimationFrame as WebpFrame, encode_animation, encode_vp8l};
 
 /// Parse error for `START..END` sweep ranges or `DX,DY` drift vectors.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -298,6 +299,8 @@ pub enum AnimFormat {
     Gif,
     /// Lossless Animated PNG (indexed palette, delta-encoded frames, alpha, crisp web playback).
     Apng,
+    /// Lossless animated WebP (palette-coded VP8L frames, delta-encoded, alpha; usually smallest).
+    Webp,
     /// Single packed PNG sprite sheet (for CSS `steps()` or game engines).
     Spritesheet,
     /// Directory of numbered lossless PNG frames (`frame_0001.png`, ...).
@@ -305,6 +308,15 @@ pub enum AnimFormat {
 }
 
 impl AnimFormat {
+    /// Every output container, in `dith list anim-formats` order.
+    pub const ALL: [Self; 5] = [
+        Self::Gif,
+        Self::Apng,
+        Self::Webp,
+        Self::Spritesheet,
+        Self::Frames,
+    ];
+
     /// Infer animation container from output path extension.
     #[must_use]
     pub fn infer_from_path(path: &Path) -> Self {
@@ -315,6 +327,7 @@ impl AnimFormat {
             .as_deref()
         {
             Some("apng") => Self::Apng,
+            Some("webp") => Self::Webp,
             Some("png") => Self::Spritesheet,
             _ => Self::Gif,
         }
@@ -325,8 +338,28 @@ impl AnimFormat {
         match self {
             Self::Gif => "gif",
             Self::Apng => "apng",
+            Self::Webp => "webp",
             Self::Spritesheet => "spritesheet",
             Self::Frames => "frames",
+        }
+    }
+
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Gif => {
+                "Exact-palette looping GIF, delta-encoded; binary transparency and 10 ms timing steps (.gif)"
+            }
+            Self::Apng => {
+                "Lossless Animated PNG, indexed and delta-encoded, with partial transparency and exact timing (.apng)"
+            }
+            Self::Webp => {
+                "Lossless animated WebP, palette-coded and delta-encoded, with partial transparency and exact timing; usually the smallest (.webp)"
+            }
+            Self::Spritesheet => {
+                "One PNG sprite sheet of all frames for CSS steps() or game engines (.png, --sheet-cols)"
+            }
+            Self::Frames => "Directory of numbered lossless PNG frames (--frames-dir)",
         }
     }
 }
@@ -969,23 +1002,12 @@ fn delta_frame(prev: &[u8], cur: &[u8], w: u16, unchanged_idx: Option<u8>) -> gi
 /// # Errors
 /// Returns an error if frames are empty or PNG encoding fails.
 pub fn encode_apng(frames: &[AnimFrame], loops: u32, optimize: bool) -> Result<Vec<u8>> {
-    let first = frames
-        .first()
-        .context("cannot encode APNG from empty frame list")?;
-    let w = first.image.width();
-    let h = first.image.height();
+    anyhow::ensure!(
+        !frames.is_empty(),
+        "cannot encode APNG from empty frame list"
+    );
+    let (w, h) = uniform_frame_size(frames, "APNG")?;
     let num_frames = u32::try_from(frames.len()).context("frame count exceeds u32")?;
-    if let Some((i, frame)) = frames
-        .iter()
-        .enumerate()
-        .find(|(_, f)| f.image.dimensions() != (w, h))
-    {
-        let (fw, fh) = frame.image.dimensions();
-        anyhow::bail!(
-            "cannot encode APNG: frame {} is {fw}x{fh} but frame 1 is {w}x{h}; all frames must share one size",
-            i + 1
-        );
-    }
     let layout = PngLayout::for_images(frames.iter().map(|f| &f.image));
 
     let mut out = Vec::new();
@@ -1036,6 +1058,65 @@ pub fn encode_apng(frames: &[AnimFrame], loops: u32, optimize: bool) -> Result<V
     } else {
         Ok(out)
     }
+}
+
+/// Size shared by every frame, or an error naming the first frame that differs from frame 1.
+fn uniform_frame_size(frames: &[AnimFrame], container: &str) -> Result<(u32, u32)> {
+    let (w, h) = frames[0].image.dimensions();
+    if let Some((i, frame)) = frames
+        .iter()
+        .enumerate()
+        .find(|(_, f)| f.image.dimensions() != (w, h))
+    {
+        let (fw, fh) = frame.image.dimensions();
+        anyhow::bail!(
+            "cannot encode {container}: frame {} is {fw}x{fh} but frame 1 is {w}x{h}; all frames must share one size",
+            i + 1
+        );
+    }
+    Ok((w, h))
+}
+
+/// Encode dithered animation frames as a lossless animated WebP (`loops == 0` -> infinite).
+///
+/// Every frame is a palette-coded VP8L bitstream (see [`crate::webp::encode_vp8l`]), encoded in
+/// parallel. Frames after the first only cover the bounding box of pixels that changed, widened to
+/// the even canvas offsets the container requires. Frames neither blend nor dispose: each one
+/// replaces its rectangle, alpha included, on top of the exact previous frame, so every composited
+/// frame is pixel-exact even with partial transparency. (Blending unchanged pixels as transparent
+/// would compress better, but decoders such as `image-webp` round opaque blended pixels.)
+///
+/// # Errors
+/// Returns an error if frames are empty, differ in size, exceed 16384 pixels, or encoding fails.
+pub fn encode_animated_webp(frames: &[AnimFrame], loops: u16) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        !frames.is_empty(),
+        "cannot encode animated WebP from empty frame list"
+    );
+    let (w, h) = uniform_frame_size(frames, "animated WebP")?;
+    let encoded: Result<Vec<WebpFrame>> = frames
+        .par_iter()
+        .enumerate()
+        .map(|(i, frame)| {
+            let (x, y, width, height) = match i.checked_sub(1) {
+                None => (0, 0, w, h),
+                Some(p) => {
+                    let (x, y, rw, rh) = changed_region(&frames[p].image, &frame.image);
+                    (x & !1, y & !1, rw + x % 2, rh + y % 2)
+                }
+            };
+            let region = image::imageops::crop_imm(&frame.image, x, y, width, height).to_image();
+            Ok(WebpFrame {
+                x,
+                y,
+                width,
+                height,
+                duration_ms: frame.delay_ms.clamp(10, 0xFF_FFFF),
+                bitstream: encode_vp8l(&region)?,
+            })
+        })
+        .collect();
+    encode_animation((w, h), loops, &encoded?)
 }
 
 /// Bounding box `(x, y, width, height)` of pixels that differ between two equally sized frames
@@ -1287,7 +1368,86 @@ mod tests {
             let anim = dither_animation_frames(&raw, &recipe, &anim_opts).unwrap();
             assert_gif_roundtrips_exactly(&anim.frames, &anim.palette);
             assert_apng_roundtrips_exactly(&anim.frames);
+            assert_webp_roundtrips_exactly(&anim.frames);
         }
+    }
+
+    fn assert_webp_roundtrips_exactly(frames: &[AnimFrame]) -> usize {
+        let bytes = encode_animated_webp(frames, 0).unwrap();
+        let decoded: Vec<(RgbaImage, u32)> = WebPDecoder::new(std::io::Cursor::new(&bytes))
+            .unwrap()
+            .into_frames()
+            .map(|f| {
+                let f = f.unwrap();
+                let (numer, denom) = f.delay().numer_denom_ms();
+                (f.into_buffer(), numer / denom)
+            })
+            .collect();
+        assert_eq!(decoded.len(), frames.len());
+        for (i, ((image, delay), frame)) in decoded.iter().zip(frames).enumerate() {
+            assert!(image == &frame.image, "WebP frame {i} differs after decode");
+            assert_eq!(*delay, frame.delay_ms, "WebP frame {i} delay");
+        }
+        bytes.len()
+    }
+
+    #[test]
+    fn animated_webp_handles_odd_sizes_single_frames_and_repeats() {
+        for (w, h) in [(1, 1), (3, 5), (101, 57)] {
+            let frames: Vec<AnimFrame> = (0..5u32)
+                .map(|i| AnimFrame {
+                    image: RgbaImage::from_fn(w, h, |x, y| {
+                        let on = (x + y + i / 2) % 3 == 0 || x == (i * 7) % w;
+                        Rgba(if on {
+                            [250, 240, 230, 255]
+                        } else {
+                            [10, 20, 30, 255]
+                        })
+                    }),
+                    delay_ms: 40 + i * 10,
+                })
+                .collect();
+            assert_webp_roundtrips_exactly(&frames);
+            assert_webp_roundtrips_exactly(&frames[..1]);
+        }
+    }
+
+    #[test]
+    fn animated_webp_stores_small_deltas_at_even_offsets() {
+        let frames: Vec<AnimFrame> = (0..6u32)
+            .map(|i| {
+                let mut image = RgbaImage::from_fn(256, 192, |x, y| {
+                    let hash = (x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA6B)) >> 7;
+                    Rgba(if hash.wrapping_mul(0xC2B2_AE35) >> 30 == 0 {
+                        [255, 255, 255, 255]
+                    } else {
+                        [0, 0, 0, 255]
+                    })
+                });
+                image.put_pixel(9 + i * 5, 7 + i * 3, Rgba([255, 0, 0, 255]));
+                AnimFrame {
+                    image,
+                    delay_ms: 70,
+                }
+            })
+            .collect();
+        let size = assert_webp_roundtrips_exactly(&frames);
+        let single = encode_animated_webp(&frames[..1], 0).unwrap().len();
+        assert!(
+            size < single * 2,
+            "{size} B for 6 frames vs {single} B for 1"
+        );
+        let mut offsets = Vec::new();
+        let bytes = encode_animated_webp(&frames, 0).unwrap();
+        for anmf in bytes.windows(10).filter(|w| &w[..4] == b"ANMF") {
+            let x = u32::from(anmf[8]) | u32::from(anmf[9]) << 8;
+            offsets.push(x * 2);
+        }
+        assert_eq!(offsets.len(), 6);
+        assert!(
+            offsets[1..].iter().all(|&x| x > 0 && x % 2 == 0),
+            "{offsets:?}"
+        );
     }
 
     fn assert_apng_roundtrips_exactly(frames: &[AnimFrame]) {
@@ -1318,6 +1478,8 @@ mod tests {
         });
         let err = encode_apng(&frames, 0, false).unwrap_err().to_string();
         assert!(err.contains("frame 2 is 32x16"), "{err}");
+        let err = encode_animated_webp(&frames, 0).unwrap_err().to_string();
+        assert!(err.contains("frame 2 is 32x16"), "{err}");
     }
 
     #[test]
@@ -1341,6 +1503,7 @@ mod tests {
             })
             .collect();
         assert_apng_roundtrips_exactly(&frames);
+        assert_webp_roundtrips_exactly(&frames);
     }
 
     #[test]

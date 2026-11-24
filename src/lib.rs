@@ -17,10 +17,13 @@ pub mod inspect;
 pub mod output;
 pub mod palette;
 mod par;
+pub mod plot;
 mod png_optimize;
 pub mod preprocess;
 pub mod preset;
 pub mod recipe;
+pub mod stipple;
+pub mod tour;
 #[cfg(feature = "cli")]
 pub mod update;
 #[cfg(feature = "cli")]

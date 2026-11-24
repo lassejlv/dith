@@ -10,7 +10,9 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::ops::Range;
+use std::sync::LazyLock;
 
+use crate::par::prelude::*;
 use anyhow::{Context, Result, ensure};
 use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, ImageEncoder, RgbaImage};
@@ -55,6 +57,7 @@ const NEIGHBORHOOD: [(i8, i8); NEIGHBORHOOD_CODES] = [
     (-6, 7), (7, 6),  (-7, 6), (8, 5),  (7, 7),  (-7, 7), (8, 6),
     (8, 7),
 ];
+/// Most bits of the hash-chain head table; small streams use about one slot per symbol.
 const HASH_BITS: u32 = 18;
 const NO_POSITION: u32 = u32::MAX;
 /// Neighborhood distance codes whose matches are tracked at every position, down to length 1;
@@ -66,8 +69,16 @@ const CHAIN_LIMIT: usize = 64;
 const LONG_MATCH: usize = 256;
 /// Copy lengths up to this are all priced individually; longer ones only at prefix-code boundaries.
 const EXACT_LENGTHS: usize = 32;
-/// Cost-model refinement passes of the optimal parse.
-const PARSE_PASSES: usize = 3;
+/// Optimal-parse passes over sub-images, each priced with the statistics of the previous one.
+const PARSE_PASSES: usize = 2;
+/// Farthest distance, in symbols, the hash chains look back. Distant short matches cost about as
+/// much as the literals they replace, and skipping them keeps the chain walk short.
+const WINDOW: usize = 1 << 16;
+const _: () = assert!(WINDOW + NEIGHBORHOOD_CODES <= MAX_DISTANCE_CODE);
+/// Symbols per independently parsed segment. Segments are searched and parsed in parallel; copies
+/// may reach back into earlier segments but never run past the end of their own. The size is
+/// fixed, so output never depends on the number of threads.
+const SEGMENT: usize = 1 << 15;
 
 /// Encode `img` as a lossless WebP file.
 ///
@@ -77,9 +88,131 @@ const PARSE_PASSES: usize = 3;
 /// # Errors
 /// Returns an error if the image is larger than 16384x16384 pixels or encoding fails.
 pub fn encode_lossless(img: &RgbaImage) -> Result<Vec<u8>> {
+    let data = encode_vp8l(img)?;
+    let mut out = Vec::with_capacity(data.len() + 21);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(b"WEBP");
+    push_chunk(&mut out, *b"VP8L", &data)?;
+    finish_riff(out)
+}
+
+/// One frame of an animated WebP: a VP8L bitstream placed on the canvas.
+#[derive(Debug, Clone)]
+pub struct AnimationFrame {
+    /// Left edge on the canvas; must be even.
+    pub x: u32,
+    /// Top edge on the canvas; must be even.
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Display time in milliseconds (at most 2^24 - 1).
+    pub duration_ms: u32,
+    /// VP8L bitstream from [`encode_vp8l`].
+    pub bitstream: Vec<u8>,
+}
+
+/// Write an animated WebP file: a `VP8X` header (flagging alpha when any frame uses it), an
+/// `ANIM` chunk with a transparent background and `loops` (`0` = infinite), and one `ANMF` chunk
+/// per frame. Frames neither blend nor dispose: each replaces its rectangle of the canvas the
+/// previous frames left behind.
+///
+/// # Errors
+/// Returns an error if the canvas or a frame exceeds WebP's limits, a frame lies outside the
+/// canvas or at an odd offset, or the file would exceed 4 GiB.
+pub fn encode_animation(
+    canvas: (u32, u32),
+    loops: u16,
+    frames: &[AnimationFrame],
+) -> Result<Vec<u8>> {
+    let (width, height) = canvas;
+    ensure!(
+        (1..=MAX_DIMENSION).contains(&width) && (1..=MAX_DIMENSION).contains(&height),
+        "WebP supports at most {MAX_DIMENSION}x{MAX_DIMENSION} pixels, got {width}x{height}"
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(b"WEBP");
+
+    let has_alpha = frames
+        .iter()
+        .any(|f| f.bitstream.get(4).is_some_and(|&b| b & 0x10 != 0));
+    let mut vp8x = vec![if has_alpha { 0x12 } else { 0x02 }, 0, 0, 0];
+    vp8x.extend_from_slice(&u24(width - 1));
+    vp8x.extend_from_slice(&u24(height - 1));
+    push_chunk(&mut out, *b"VP8X", &vp8x)?;
+
+    let mut anim = vec![0u8; 4];
+    anim.extend_from_slice(&loops.to_le_bytes());
+    push_chunk(&mut out, *b"ANIM", &anim)?;
+
+    for frame in frames {
+        ensure!(
+            frame.x % 2 == 0 && frame.y % 2 == 0,
+            "WebP frame offsets must be even, got ({}, {})",
+            frame.x,
+            frame.y
+        );
+        ensure!(
+            frame.width >= 1
+                && frame.height >= 1
+                && frame.x + frame.width <= width
+                && frame.y + frame.height <= height,
+            "WebP frame {}x{} at ({}, {}) does not fit the {width}x{height} canvas",
+            frame.width,
+            frame.height,
+            frame.x,
+            frame.y
+        );
+        let mut anmf = Vec::with_capacity(frame.bitstream.len() + 25);
+        anmf.extend_from_slice(&u24(frame.x / 2));
+        anmf.extend_from_slice(&u24(frame.y / 2));
+        anmf.extend_from_slice(&u24(frame.width - 1));
+        anmf.extend_from_slice(&u24(frame.height - 1));
+        anmf.extend_from_slice(&u24(frame.duration_ms.min(0xFF_FFFF)));
+        anmf.push(0x02);
+        push_chunk(&mut anmf, *b"VP8L", &frame.bitstream)?;
+        push_chunk(&mut out, *b"ANMF", &anmf)?;
+    }
+    finish_riff(out)
+}
+
+fn u24(value: u32) -> [u8; 3] {
+    let [a, b, c, _] = value.to_le_bytes();
+    [a, b, c]
+}
+
+/// Append a RIFF chunk, padded to an even length.
+fn push_chunk(out: &mut Vec<u8>, fourcc: [u8; 4], payload: &[u8]) -> Result<()> {
+    let len = u32::try_from(payload.len()).context("WebP chunk exceeds 4 GiB")?;
+    out.extend_from_slice(&fourcc);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(payload);
+    if payload.len() % 2 == 1 {
+        out.push(0);
+    }
+    Ok(())
+}
+
+/// Fill in the RIFF size of a file built from `RIFF`, a placeholder size, `WEBP`, and chunks.
+fn finish_riff(mut out: Vec<u8>) -> Result<Vec<u8>> {
+    let size = u32::try_from(out.len() - 8).context("WebP file exceeds 4 GiB")?;
+    out[4..8].copy_from_slice(&size.to_le_bytes());
+    Ok(out)
+}
+
+/// Encode `img` as a bare VP8L bitstream, the payload of a `VP8L` chunk.
+///
+/// The LZ77 search runs on a rayon worker, so its many short parallel steps never wait for a
+/// thread to wake up.
+///
+/// # Errors
+/// Returns an error if the image is larger than 16384x16384 pixels or encoding fails.
+pub fn encode_vp8l(img: &RgbaImage) -> Result<Vec<u8>> {
     let PngLayout::Indexed(palette) = PngLayout::for_images([img]) else {
-        let mut out = Vec::new();
-        WebPEncoder::new_lossless(&mut out)
+        let mut file = Vec::new();
+        WebPEncoder::new_lossless(&mut file)
             .write_image(
                 img.as_raw(),
                 img.width(),
@@ -87,7 +220,7 @@ pub fn encode_lossless(img: &RgbaImage) -> Result<Vec<u8>> {
                 ExtendedColorType::Rgba8,
             )
             .context("encoding webp output")?;
-        return Ok(out);
+        return vp8l_payload(&file).context("image's WebP encoder wrote no VP8L chunk");
     };
     let (width, height) = img.dimensions();
     ensure!(
@@ -127,21 +260,23 @@ pub fn encode_lossless(img: &RgbaImage) -> Result<Vec<u8>> {
 
     w.put(0, 1);
     w.put(0, 1);
-    w.put(0, 1);
-    write_entropy_coded_image(&mut w, &backward_references(&indices, xsize));
+    let (tokens, meta) = crate::par::on_worker(|| main_image(&indices, xsize, height as usize));
+    write_main_image(&mut w, &tokens, meta.as_ref(), xsize);
+    Ok(w.finish())
+}
 
-    let data = w.finish();
-    let chunk_len = u32::try_from(data.len()).context("WebP bitstream exceeds 4 GiB")?;
-    let mut out = Vec::with_capacity(data.len() + 21);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(12 + chunk_len + chunk_len % 2).to_le_bytes());
-    out.extend_from_slice(b"WEBPVP8L");
-    out.extend_from_slice(&chunk_len.to_le_bytes());
-    out.extend_from_slice(&data);
-    if data.len() % 2 == 1 {
-        out.push(0);
+/// The payload of the first `VP8L` chunk of a WebP file.
+fn vp8l_payload(file: &[u8]) -> Option<Vec<u8>> {
+    let mut rest = file.get(12..)?;
+    while rest.len() >= 8 {
+        let len = u32::from_le_bytes(rest[4..8].try_into().ok()?) as usize;
+        let payload = rest.get(8..8 + len)?;
+        if &rest[..4] == b"VP8L" {
+            return Some(payload.to_vec());
+        }
+        rest = rest.get(8 + len + len % 2..)?;
     }
-    Ok(out)
+    None
 }
 
 /// Replace every pixel by its palette index and pack `8 >> width_bits`-bit indices
@@ -211,32 +346,40 @@ struct Histograms {
 
 impl Histograms {
     fn new(tokens: &[Token]) -> Self {
-        let mut h = Self {
+        let mut h = Self::empty();
+        for &token in tokens {
+            h.add(token);
+        }
+        h
+    }
+
+    fn empty() -> Self {
+        Self {
             green: vec![0; NUM_LITERALS + NUM_LENGTH_CODES],
             red: vec![0; NUM_LITERALS],
             blue: vec![0; NUM_LITERALS],
             alpha: vec![0; NUM_LITERALS],
             distance: vec![0; NUM_DISTANCE_CODES],
             extra_bits: 0,
-        };
-        for &token in tokens {
-            match token {
-                Token::Literal([r, g, b, a]) => {
-                    h.green[usize::from(g)] += 1;
-                    h.red[usize::from(r)] += 1;
-                    h.blue[usize::from(b)] += 1;
-                    h.alpha[usize::from(a)] += 1;
-                }
-                Token::Copy { length, code } => {
-                    let (length_symbol, length_extra, _) = prefix_encode(length);
-                    let (distance_symbol, distance_extra, _) = prefix_encode(code);
-                    h.green[NUM_LITERALS + length_symbol] += 1;
-                    h.distance[distance_symbol] += 1;
-                    h.extra_bits += u64::from(length_extra + distance_extra);
-                }
+        }
+    }
+
+    fn add(&mut self, token: Token) {
+        match token {
+            Token::Literal([r, g, b, a]) => {
+                self.green[usize::from(g)] += 1;
+                self.red[usize::from(r)] += 1;
+                self.blue[usize::from(b)] += 1;
+                self.alpha[usize::from(a)] += 1;
+            }
+            Token::Copy { length, code } => {
+                let (length_symbol, length_extra, _) = prefix_encode(length);
+                let (distance_symbol, distance_extra, _) = prefix_encode(code);
+                self.green[NUM_LITERALS + length_symbol] += 1;
+                self.distance[distance_symbol] += 1;
+                self.extra_bits += u64::from(length_extra + distance_extra);
             }
         }
-        h
     }
 
     fn all(&self) -> [&Vec<u32>; 5] {
@@ -256,11 +399,16 @@ impl Histograms {
 
     /// Size of the coded symbols in bits, excluding the prefix code headers.
     fn coded_bits(&self) -> u64 {
+        self.coded_bits_with(&self.codes())
+    }
+
+    /// Size of the coded symbols under `codes` in bits, excluding the prefix code headers.
+    fn coded_bits_with(&self, codes: &[PrefixCode; 5]) -> u64 {
         self.extra_bits
             + self
                 .all()
                 .iter()
-                .zip(self.codes())
+                .zip(codes)
                 .map(|(histogram, code)| {
                     histogram
                         .iter()
@@ -274,28 +422,405 @@ impl Histograms {
 
 /// Write the five prefix codes for `tokens` followed by the tokens themselves.
 fn write_entropy_coded_image(w: &mut BitWriter, tokens: &[Token]) {
-    let [green, red, blue, alpha, distance] = Histograms::new(tokens).codes();
-    for code in [&green, &red, &blue, &alpha, &distance] {
+    let codes = Histograms::new(tokens).codes();
+    for code in &codes {
         code.write_header(w);
     }
     for &token in tokens {
-        match token {
-            Token::Literal([r, g, b, a]) => {
-                green.write(w, usize::from(g));
-                red.write(w, usize::from(r));
-                blue.write(w, usize::from(b));
-                alpha.write(w, usize::from(a));
+        write_token(w, &codes, token);
+    }
+}
+
+/// Write one token with the green, red, blue, alpha, and distance codes `codes`.
+fn write_token(w: &mut BitWriter, codes: &[PrefixCode; 5], token: Token) {
+    let [green, red, blue, alpha, distance] = codes;
+    match token {
+        Token::Literal([r, g, b, a]) => {
+            green.write(w, usize::from(g));
+            red.write(w, usize::from(r));
+            blue.write(w, usize::from(b));
+            alpha.write(w, usize::from(a));
+        }
+        Token::Copy { length, code } => {
+            let (symbol, extra_bits, extra) = prefix_encode(length);
+            green.write(w, NUM_LITERALS + symbol);
+            w.put(extra, extra_bits);
+            let (symbol, extra_bits, extra) = prefix_encode(code);
+            distance.write(w, symbol);
+            w.put(extra, extra_bits);
+        }
+    }
+}
+
+/// Position of the first symbol of every token.
+fn token_starts(tokens: &[Token]) -> impl Iterator<Item = usize> {
+    tokens.iter().scan(0, |position, token| {
+        let start = *position;
+        *position += match *token {
+            Token::Literal(_) => 1,
+            Token::Copy { length, .. } => length,
+        };
+        Some(start)
+    })
+}
+
+/// Bits taken by the headers of `codes`.
+fn header_bits(codes: &[PrefixCode; 5]) -> u64 {
+    let mut w = BitWriter::default();
+    for code in codes {
+        code.write_header(&mut w);
+    }
+    w.len_bits()
+}
+
+/// Bits taken by `tokens` written as an entropy-coded image with its own codes.
+fn entropy_coded_bits(tokens: &[Token]) -> u64 {
+    let histograms = Histograms::new(tokens);
+    let codes = histograms.codes();
+    header_bits(&codes) + histograms.coded_bits_with(&codes)
+}
+
+/// Prefix code groups assigned to square tiles of the main image (VP8L meta prefix codes).
+#[derive(Debug)]
+struct MetaCodes {
+    /// Tiles are `1 << bits` symbols wide and tall.
+    bits: u32,
+    tiles_x: usize,
+    /// Group of every tile, row by row, numbered densely from 0.
+    tile_groups: Vec<u8>,
+}
+
+impl MetaCodes {
+    /// Group of the tile holding symbol `position`.
+    fn group_at(&self, position: usize, xsize: usize) -> u8 {
+        let (x, y) = (position % xsize, position / xsize);
+        self.tile_groups[(y >> self.bits) * self.tiles_x + (x >> self.bits)]
+    }
+
+    /// Group of each token, from the tile holding its first symbol.
+    fn token_groups(&self, tokens: &[Token], xsize: usize) -> Vec<u8> {
+        token_starts(tokens)
+            .map(|start| self.group_at(start, xsize))
+            .collect()
+    }
+
+    /// Histograms of every group.
+    fn histograms(&self, tokens: &[Token], groups: &[u8]) -> Vec<Histograms> {
+        let count = usize::from(self.tile_groups.iter().copied().max().unwrap_or(0)) + 1;
+        let mut histograms: Vec<Histograms> = (0..count).map(|_| Histograms::empty()).collect();
+        for (&token, &group) in tokens.iter().zip(groups) {
+            histograms[usize::from(group)].add(token);
+        }
+        histograms
+    }
+
+    /// Exact size in bits of the meta prefix code image, every group's codes, and `tokens`.
+    fn total_bits(&self, tokens: &[Token], xsize: usize) -> u64 {
+        let groups = self.token_groups(tokens, xsize);
+        5 + entropy_coded_bits(&self.image_tokens())
+            + self
+                .histograms(tokens, &groups)
+                .iter()
+                .map(|h| {
+                    let codes = h.codes();
+                    header_bits(&codes) + h.coded_bits_with(&codes)
+                })
+                .sum::<u64>()
+    }
+
+    /// Tokens of the meta prefix code image: one pixel per tile, its group in green.
+    fn image_tokens(&self) -> Vec<Token> {
+        backward_references(&self.tile_groups, self.tiles_x)
+    }
+}
+
+/// Write the main image's codes and tokens: a single set of five prefix codes, or meta prefix
+/// codes giving each tile one of several sets when that is smaller.
+fn write_main_image(w: &mut BitWriter, tokens: &[Token], meta: Option<&MetaCodes>, xsize: usize) {
+    let Some(meta) = meta else {
+        w.put(0, 1);
+        write_entropy_coded_image(w, tokens);
+        return;
+    };
+    w.put(1, 1);
+    w.put(meta.bits - 2, 3);
+    w.put(0, 1);
+    write_entropy_coded_image(w, &meta.image_tokens());
+    let groups = meta.token_groups(tokens, xsize);
+    let codes: Vec<[PrefixCode; 5]> = meta
+        .histograms(tokens, &groups)
+        .iter()
+        .map(Histograms::codes)
+        .collect();
+    for group in &codes {
+        for code in group {
+            code.write_header(w);
+        }
+    }
+    for (&token, &group) in tokens.iter().zip(&groups) {
+        write_token(w, &codes[usize::from(group)], token);
+    }
+}
+
+/// Most tiles a meta prefix code candidate may have, bounding the clustering work.
+const MAX_TILES: usize = 4096;
+/// Tile sizes tried, from the smallest one that respects `MAX_TILES`.
+const TILE_SIZES_TRIED: usize = 2;
+/// Most prefix code groups a meta prefix code image may use.
+const MAX_GROUPS: usize = 256;
+/// Tile-group pairs priced per parallel clustering job; fewer go to one thread.
+const TILES_PER_JOB: usize = 1 << 12;
+/// Assignment rounds per clustering step.
+const CLUSTER_ROUNDS: usize = 3;
+/// Symbols of a tile histogram: green (literals and lengths), then distances.
+const CLUSTER_SYMBOLS: usize = NUM_LITERALS + NUM_LENGTH_CODES + NUM_DISTANCE_CODES;
+
+/// The smallest meta prefix code layout for `tokens` (`None` when one set of codes for the
+/// whole image is smallest) and the exact size in bits it codes the image in.
+///
+/// For each tile size, tiles are clustered by their symbol
+/// statistics (k-means under an entropy cost, seeded at the tiles the current groups code worst),
+/// doubling the group count while the exact coded size keeps shrinking noticeably.
+fn plan_meta_codes(tokens: &[Token], xsize: usize, ysize: usize) -> (u64, Option<MetaCodes>) {
+    let single = 1 + entropy_coded_bits(tokens);
+    let palette_literals = tokens
+        .iter()
+        .all(|t| matches!(t, Token::Copy { .. } | Token::Literal([0, _, 0, 255])));
+    if !palette_literals {
+        return (single, None);
+    }
+    let mut best = (single, None);
+    let extra_bits = Histograms::new(tokens).extra_bits;
+    let tile_sizes = (2..=9u32)
+        .filter(|&bits| xsize.div_ceil(1 << bits) * ysize.div_ceil(1 << bits) <= MAX_TILES)
+        .take(TILE_SIZES_TRIED);
+    for bits in tile_sizes {
+        let tiles_x = xsize.div_ceil(1 << bits);
+        let tiles = tiles_x * ysize.div_ceil(1 << bits);
+        if tiles < 2 {
+            break;
+        }
+        let mut counts = vec![[0u32; CLUSTER_SYMBOLS]; tiles];
+        for (&token, start) in tokens.iter().zip(token_starts(tokens)) {
+            let (x, y) = (start % xsize, start / xsize);
+            let tile = &mut counts[(y >> bits) * tiles_x + (x >> bits)];
+            match token {
+                Token::Literal([_, g, _, _]) => tile[usize::from(g)] += 1,
+                Token::Copy { length, code } => {
+                    tile[NUM_LITERALS + prefix_encode(length).0] += 1;
+                    tile[NUM_LITERALS + NUM_LENGTH_CODES + prefix_encode(code).0] += 1;
+                }
             }
-            Token::Copy { length, code } => {
-                let (symbol, extra_bits, extra) = prefix_encode(length);
-                green.write(w, NUM_LITERALS + symbol);
-                w.put(extra, extra_bits);
-                let (symbol, extra_bits, extra) = prefix_encode(code);
-                distance.write(w, symbol);
-                w.put(extra, extra_bits);
+        }
+        let mut clustering = Clustering::new(&counts);
+        let mut previous = single;
+        while clustering.groups() < MAX_GROUPS.min(tiles) {
+            clustering.grow((clustering.groups() * 2).min(MAX_GROUPS));
+            clustering.refine();
+            let meta = MetaCodes {
+                bits,
+                tiles_x,
+                tile_groups: clustering.dense_assignment(),
+            };
+            let size = 5
+                + extra_bits
+                + entropy_coded_bits(&meta.image_tokens())
+                + clustering.counts.iter().map(group_bits).sum::<u64>();
+            let worthwhile = size + size / 400 < previous;
+            previous = previous.min(size);
+            if size < best.0 {
+                best = (size, Some(meta));
+            }
+            if !worthwhile {
+                break;
             }
         }
     }
+    best
+}
+
+/// Exact bits of one group's five prefix codes and its symbols (extra bits excluded), from
+/// counts laid out like `CLUSTER_SYMBOLS` for palette literals `[0, index, 0, 255]`.
+fn group_bits(counts: &[u32; CLUSTER_SYMBOLS]) -> u64 {
+    let (green, distance) = counts.split_at(NUM_LITERALS + NUM_LENGTH_CODES);
+    let literals: u32 = green[..NUM_LITERALS].iter().sum();
+    let mut zero = vec![0; NUM_LITERALS];
+    zero[0] = literals;
+    let mut opaque = vec![0; NUM_LITERALS];
+    opaque[255] = literals;
+    let histograms = Histograms {
+        green: green.to_vec(),
+        red: zero.clone(),
+        blue: zero,
+        alpha: opaque,
+        distance: distance.to_vec(),
+        extra_bits: 0,
+    };
+    let codes = histograms.codes();
+    header_bits(&codes) + histograms.coded_bits_with(&codes)
+}
+
+/// k-means clustering of tile histograms under an entropy cost.
+#[derive(Debug)]
+struct Clustering {
+    /// Nonzero `(symbol, count)` entries of every tile.
+    tiles: Vec<Vec<(u16, u32)>>,
+    /// Bits each tile would take under codes fitted to it alone.
+    own_bits: Vec<f32>,
+    assignment: Vec<usize>,
+    /// Bits each tile takes under its group's costs.
+    assigned_bits: Vec<f32>,
+    /// Symbol counts of every group.
+    counts: Vec<[u32; CLUSTER_SYMBOLS]>,
+    /// Estimated bits per symbol of every group.
+    costs: Vec<Vec<f32>>,
+}
+
+impl Clustering {
+    fn new(counts: &[[u32; CLUSTER_SYMBOLS]]) -> Self {
+        let tiles: Vec<Vec<(u16, u32)>> = counts
+            .iter()
+            .map(|tile| {
+                (0u16..)
+                    .zip(tile)
+                    .filter(|&(_, &c)| c > 0)
+                    .map(|(s, &c)| (s, c))
+                    .collect()
+            })
+            .collect();
+        let own_bits = counts
+            .iter()
+            .zip(&tiles)
+            .map(|(tile, entries)| {
+                let costs = entropy_costs(tile);
+                entries
+                    .iter()
+                    .fold(0.0, |sum, &(s, c)| sum + costs[usize::from(s)] * c as f32)
+            })
+            .collect();
+        let mut clustering = Self {
+            assignment: vec![0; tiles.len()],
+            assigned_bits: vec![0.0; tiles.len()],
+            tiles,
+            own_bits,
+            counts: Vec::new(),
+            costs: Vec::new(),
+        };
+        clustering.update();
+        clustering
+    }
+
+    fn groups(&self) -> usize {
+        self.costs.len()
+    }
+
+    /// Bits of `tile` under the costs of group `group`.
+    fn bits(&self, tile: usize, group: usize) -> f32 {
+        let costs = &self.costs[group];
+        self.tiles[tile]
+            .iter()
+            .fold(0.0, |sum, &(s, c)| sum + costs[usize::from(s)] * c as f32)
+    }
+
+    /// Recompute group costs from the current assignment, dropping empty groups.
+    fn update(&mut self) {
+        let mut counts: Vec<[u32; CLUSTER_SYMBOLS]> = Vec::new();
+        let mut renumber: Vec<Option<usize>> =
+            vec![None; self.assignment.iter().max().map_or(1, |&g| g + 1)];
+        for (tile, group) in self.tiles.iter().zip(&mut self.assignment) {
+            let dense = *renumber[*group].get_or_insert_with(|| {
+                counts.push([0; CLUSTER_SYMBOLS]);
+                counts.len() - 1
+            });
+            *group = dense;
+            for &(s, c) in tile {
+                counts[dense][usize::from(s)] += c;
+            }
+        }
+        self.costs = counts.iter().map(entropy_costs).collect();
+        self.counts = counts;
+        self.assigned_bits = (0..self.tiles.len())
+            .map(|t| self.bits(t, self.assignment[t]))
+            .collect();
+    }
+
+    /// Add groups seeded at the tiles that lose the most bits under their current group until
+    /// there are `target` groups.
+    fn grow(&mut self, target: usize) {
+        let mut current = self.assigned_bits.clone();
+        while self.groups() < target {
+            let Some((seed, loss)) = current
+                .iter()
+                .zip(&self.own_bits)
+                .map(|(&bits, &own)| bits - own)
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+            else {
+                return;
+            };
+            if loss <= 0.0 {
+                return;
+            }
+            let mut counts = [0u32; CLUSTER_SYMBOLS];
+            for &(s, c) in &self.tiles[seed] {
+                counts[usize::from(s)] = c;
+            }
+            self.costs.push(entropy_costs(&counts));
+            self.counts.push(counts);
+            let group = self.groups() - 1;
+            self.assignment[seed] = group;
+            for (t, bits) in current.iter_mut().enumerate() {
+                *bits = bits.min(self.bits(t, group));
+            }
+            current[seed] = self.own_bits[seed];
+        }
+    }
+
+    /// Alternate assigning every tile to its cheapest group and refitting group costs.
+    fn refine(&mut self) {
+        for _ in 0..CLUSTER_ROUNDS {
+            let assignment: Vec<usize> = (0..self.tiles.len())
+                .into_par_iter()
+                .with_min_len(TILES_PER_JOB / self.groups())
+                .map(|t| {
+                    (0..self.groups())
+                        .map(|g| (self.bits(t, g), g))
+                        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+                        .map_or(0, |(_, g)| g)
+                })
+                .collect();
+            let changed = assignment != self.assignment;
+            self.assignment = assignment;
+            self.update();
+            if !changed {
+                return;
+            }
+        }
+    }
+
+    /// Group of every tile, numbered densely from 0 in order of first use.
+    fn dense_assignment(&self) -> Vec<u8> {
+        let mut renumber = vec![None; self.groups()];
+        let mut next = 0u8;
+        self.assignment
+            .iter()
+            .map(|&g| {
+                *renumber[g].get_or_insert_with(|| {
+                    next += 1;
+                    next - 1
+                })
+            })
+            .collect()
+    }
+}
+
+/// Entropy-coded bits per symbol for counts laid out like `CLUSTER_SYMBOLS`, green and distance
+/// symbols priced separately.
+fn entropy_costs(counts: &[u32; CLUSTER_SYMBOLS]) -> Vec<f32> {
+    let (green, distance) = counts.split_at(NUM_LITERALS + NUM_LENGTH_CODES);
+    let mut costs = symbol_costs(green);
+    costs.extend(symbol_costs(distance));
+    costs
 }
 
 /// A canonical prefix code.
@@ -512,13 +1037,20 @@ impl CostModel {
     }
 
     fn new(green: &[u32], distance: &[u32]) -> Self {
+        /// Prefix symbol and extra-bit count of every copy length.
+        static LENGTH_PREFIXES: LazyLock<Vec<(usize, f32)>> = LazyLock::new(|| {
+            (0..=MAX_COPY_LENGTH)
+                .map(|l| {
+                    let (symbol, extra_bits, _) = prefix_encode(l.max(1));
+                    (symbol, extra_bits as f32)
+                })
+                .collect()
+        });
         let green = symbol_costs(green);
         let length_prefix = &green[NUM_LITERALS..];
-        let length = (0..=MAX_COPY_LENGTH)
-            .map(|l| {
-                let (symbol, extra_bits, _) = prefix_encode(l.max(1));
-                length_prefix[symbol] + extra_bits as f32
-            })
+        let length = LENGTH_PREFIXES
+            .iter()
+            .map(|&(symbol, extra_bits)| length_prefix[symbol] + extra_bits)
             .collect();
         Self {
             literal: green[..NUM_LITERALS].to_vec(),
@@ -533,13 +1065,47 @@ impl CostModel {
     }
 }
 
-/// Entropy estimate in bits per symbol; unused symbols get a finite, pessimistic cost.
+/// Entropy estimate in bits per symbol; unused symbols are priced as if seen 0.4 times.
 fn symbol_costs(histogram: &[u32]) -> Vec<f32> {
-    let total = histogram.iter().map(|&c| c as f32).sum::<f32>().max(1.0);
+    /// `log2(1 / 0.4)`.
+    const UNSEEN: f64 = 1.321_928_094_887_362_3;
+    let total = log2_count(histogram.iter().map(|&c| u64::from(c)).sum::<u64>().max(1));
     histogram
         .iter()
-        .map(|&c| (f64::from(total / (c as f32).max(0.4)).log2() as f32).max(0.0))
+        .map(|&c| {
+            let bits = if c == 0 {
+                total + UNSEEN
+            } else {
+                total - log2_count(u64::from(c))
+            };
+            bits.max(0.0) as f32
+        })
         .collect()
+}
+
+/// `log2(x)` for `x >= 1`, cached for small counts.
+fn log2_count(x: u64) -> f64 {
+    static SMALL: LazyLock<Vec<f64>> =
+        LazyLock::new(|| (0..1 << 12).map(|x| log2(x.max(1))).collect());
+    SMALL.get(x as usize).copied().unwrap_or_else(|| log2(x))
+}
+
+/// `log2(x)` for `x >= 1` from correctly rounded IEEE-754 operations only, so it gives the same
+/// bits on every platform (libm's `log2` may differ in the last place).
+fn log2(x: u64) -> f64 {
+    let exponent = x.ilog2();
+    let mut mantissa = x as f64 / f64::from_bits(u64::from(1023 + exponent) << 52);
+    let mut result = f64::from(exponent);
+    let mut bit = 0.5;
+    for _ in 0..40 {
+        mantissa *= mantissa;
+        if mantissa >= 2.0 {
+            mantissa *= 0.5;
+            result += bit;
+        }
+        bit *= 0.5;
+    }
+    result
 }
 
 /// LZ77 match finder over a symbol stream laid out in rows of `xsize`.
@@ -551,8 +1117,16 @@ struct Matcher<'a> {
     tracked: Vec<(usize, usize)>,
     /// Ranges of `tracked` sharing a distance prefix symbol, and therefore a cost.
     groups: Vec<Range<usize>>,
-    /// Hash-chain matches longer than every tracked neighborhood match, as `(length, code)`;
-    /// those starting at position `i` are `chain_matches[chain_starts[i]..chain_starts[i + 1]]`.
+    segments: Vec<Segment>,
+    xsize: usize,
+}
+
+/// Hash-chain matches of one parse segment.
+#[derive(Debug)]
+struct Segment {
+    range: Range<usize>,
+    /// Matches longer than every tracked neighborhood match, as `(length, code)`; those starting
+    /// at `range.start + k` are `chain_matches[chain_starts[k]..chain_starts[k + 1]]`.
     chain_matches: Vec<(u16, u32)>,
     chain_starts: Vec<u32>,
 }
@@ -582,82 +1156,34 @@ impl<'a> Matcher<'a> {
         }
 
         let n = symbols.len();
-        let mut longest_tracked = vec![0u16; n];
-        let mut runs = vec![0usize; tracked.len()];
-        for i in (0..n).rev() {
-            let symbol = Some(&symbols[i]);
-            let mut longest = 0;
-            for (run, &(distance, _)) in runs.iter_mut().zip(&tracked) {
-                let matches = usize::from(symbols.get(i.wrapping_sub(distance)) == symbol);
-                *run = (*run + 1).min(MAX_COPY_LENGTH) * matches;
-                longest = longest.max(*run);
-            }
-            longest_tracked[i] = longest as u16;
-        }
-
-        let mut head = vec![NO_POSITION; 1 << HASH_BITS];
+        let hash_bits = n.next_power_of_two().ilog2().clamp(8, HASH_BITS);
+        let mut head = vec![NO_POSITION; 1 << hash_bits];
         let mut chain = vec![NO_POSITION; n];
-        let mut chain_matches = Vec::new();
-        let mut chain_starts = Vec::with_capacity(n + 1);
-        for i in 0..n {
-            chain_starts.push(chain_matches.len() as u32);
-            if i + 3 > n {
-                continue;
-            }
-            let key = u32::from(symbols[i]) << 16
-                | u32::from(symbols[i + 1]) << 8
-                | u32::from(symbols[i + 2]);
-            let hash = (key.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize;
+        for (i, window) in symbols.windows(3).enumerate() {
+            let key = u32::from(window[0]) << 16 | u32::from(window[1]) << 8 | u32::from(window[2]);
+            let hash = (key.wrapping_mul(0x9E37_79B1) >> (32 - hash_bits)) as usize;
             chain[i] = head[hash];
             head[hash] = i as u32;
-
-            let limit = (n - i).min(MAX_COPY_LENGTH).min(LONG_MATCH);
-            let mut longest = usize::from(longest_tracked[i]);
-            let mut j = chain[i];
-            for _ in 0..CHAIN_LIMIT {
-                if j == NO_POSITION || longest >= limit {
-                    break;
-                }
-                let start = j as usize;
-                let distance = i - start;
-                if distance + NEIGHBORHOOD_CODES > MAX_DISTANCE_CODE {
-                    break;
-                }
-                let code = match neighbor_codes.get(distance) {
-                    Some(&code) if code != 0 => usize::from(code),
-                    _ => distance + NEIGHBORHOOD_CODES,
-                };
-                if code > TRACKED_CODES && symbols[start + longest] == symbols[i + longest] {
-                    let length = symbols[i..i + (n - i).min(MAX_COPY_LENGTH)]
-                        .iter()
-                        .zip(&symbols[start..])
-                        .take_while(|(a, b)| a == b)
-                        .count();
-                    if length > longest && length >= 3 {
-                        longest = length;
-                        chain_matches.push((length as u16, code as u32));
-                    }
-                }
-                j = chain[start];
-            }
         }
-        chain_starts.push(chain_matches.len() as u32);
+
+        let segments = (0..n.div_ceil(SEGMENT))
+            .into_par_iter()
+            .map(|k| {
+                let range = k * SEGMENT..((k + 1) * SEGMENT).min(n);
+                search_segment(symbols, &tracked, &neighbor_codes, &chain, range)
+            })
+            .collect();
         Self {
             symbols,
             tracked,
             groups,
-            chain_matches,
-            chain_starts,
+            segments,
+            xsize,
         }
     }
 
-    /// Cheapest parse under `model`, found by dynamic programming over positions in order.
-    ///
-    /// A position whose longest match reaches `LONG_MATCH` takes that match outright, skipping the
-    /// positions it covers.
-    fn parse(&self, model: &CostModel, length_steps: &[usize]) -> Vec<Token> {
-        let s = self.symbols;
-        let n = s.len();
+    /// Distance costs of the tracked groups under `model` and the groups in ascending cost.
+    fn price(&self, model: CostModel) -> Pricing {
         let group_costs: Vec<f32> = self
             .groups
             .iter()
@@ -665,44 +1191,93 @@ impl<'a> Matcher<'a> {
             .collect();
         let mut group_order: Vec<usize> = (0..self.groups.len()).collect();
         group_order.sort_by(|&a, &b| group_costs[a].total_cmp(&group_costs[b]));
+        Pricing {
+            model,
+            group_costs,
+            group_order,
+        }
+    }
+
+    /// Cheapest parse of `segment`, found by dynamic programming over positions in order. Each
+    /// position is priced with `prices[0]`, or with the prices of its tile's group under `meta`.
+    ///
+    /// A position whose longest match reaches `LONG_MATCH` takes that match outright, skipping the
+    /// positions it covers.
+    fn parse(
+        &self,
+        segment: &Segment,
+        prices: &[Pricing],
+        meta: Option<&MetaCodes>,
+        length_steps: &[usize],
+    ) -> Vec<Token> {
+        let s = self.symbols;
+        let Range { start, end: n } = segment.range;
         let mut match_ends = vec![0usize; self.tracked.len()];
+        let mut active = 0u32;
+        let mut group_of = vec![0usize; self.tracked.len()];
+        for (g, group) in self.groups.iter().enumerate() {
+            group_of[group.clone()].fill(g);
+        }
         let mut group_longest = vec![0usize; self.groups.len()];
 
-        let mut cost = vec![f64::INFINITY; n + 1];
+        let len = n - start;
+        let mut cost = vec![f64::INFINITY; len + 1];
         cost[0] = 0.0;
-        let mut steps = vec![(0u16, 0u32); n + 1];
+        let mut steps = vec![(0u16, 0u32); len + 1];
         let mut candidates: Vec<(f32, usize, usize)> = Vec::new();
-        let mut i = 0;
+        let mut i = start;
         while i < n {
-            for (longest, group) in group_longest.iter_mut().zip(&self.groups) {
-                let mut best = 0;
-                for (k, end) in group.clone().zip(&mut match_ends[group.clone()]) {
-                    let distance = self.tracked[k].0;
-                    if *end <= i {
-                        *end = i;
-                        if distance <= i {
-                            while *end < n && s[*end] == s[*end - distance] {
-                                *end += 1;
-                            }
-                        }
-                    }
-                    best = best.max((*end - i).min(MAX_COPY_LENGTH) << 8 | k);
+            let pricing = &prices[meta.map_or(0, |meta| usize::from(meta.group_at(i, self.xsize)))];
+            let model = &pricing.model;
+            let mut live = active;
+            while live != 0 {
+                let k = live.trailing_zeros() as usize;
+                live &= live - 1;
+                if match_ends[k] <= i {
+                    active &= !(1 << k);
                 }
-                *longest = best;
+            }
+            let symbol = s[i];
+            let mut starting = 0u32;
+            for (k, &(distance, _)) in self.tracked.iter().enumerate() {
+                let fresh = distance <= i && s[i - distance] == symbol;
+                starting |= u32::from(fresh) << k;
+            }
+            starting &= !active;
+            active |= starting;
+            while starting != 0 {
+                let k = starting.trailing_zeros() as usize;
+                starting &= starting - 1;
+                let distance = self.tracked[k].0;
+                let end = &mut match_ends[k];
+                *end = i + 1;
+                while *end < n && s[*end] == s[*end - distance] {
+                    *end += 1;
+                }
+            }
+            group_longest.fill(0);
+            let mut live = active;
+            while live != 0 {
+                let k = live.trailing_zeros() as usize;
+                live &= live - 1;
+                let length = match_ends[k] - i;
+                let best = &mut group_longest[group_of[k]];
+                *best = (*best).max(length.min(MAX_COPY_LENGTH) << 8 | k);
             }
             candidates.clear();
             let mut longest = 0;
-            for &g in &group_order {
+            for &g in &pricing.group_order {
                 let length = group_longest[g] >> 8;
                 if length > longest {
                     longest = length;
                     let code = self.tracked[group_longest[g] & 0xff].1;
-                    candidates.push((group_costs[g], length, code));
+                    candidates.push((pricing.group_costs[g], length, code));
                 }
             }
 
-            let chained = &self.chain_matches
-                [self.chain_starts[i] as usize..self.chain_starts[i + 1] as usize];
+            let k = i - start;
+            let chained = &segment.chain_matches
+                [segment.chain_starts[k] as usize..segment.chain_starts[k + 1] as usize];
             if !chained.is_empty() {
                 for &(length, code) in chained {
                     let code = code as usize;
@@ -711,11 +1286,11 @@ impl<'a> Matcher<'a> {
                 candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
             }
 
-            let here = cost[i];
+            let here = cost[k];
             let literal = here + f64::from(model.literal[usize::from(s[i])]);
-            if literal < cost[i + 1] {
-                cost[i + 1] = literal;
-                steps[i + 1] = (0, 0);
+            if literal < cost[k + 1] {
+                cost[k + 1] = literal;
+                steps[k + 1] = (0, 0);
             }
             let mut covered = 0;
             for &(distance_cost, length, code) in &candidates {
@@ -729,9 +1304,9 @@ impl<'a> Matcher<'a> {
                     .chain(std::iter::once(&length))
                 {
                     let c = here + f64::from(distance_cost + model.length[l]);
-                    if c < cost[i + l] {
-                        cost[i + l] = c;
-                        steps[i + l] = (l as u16, code as u32);
+                    if c < cost[k + l] {
+                        cost[k + l] = c;
+                        steps[k + l] = (l as u16, code as u32);
                     }
                 }
                 covered = length;
@@ -740,12 +1315,12 @@ impl<'a> Matcher<'a> {
         }
 
         let mut tokens = Vec::new();
-        let mut end = n;
+        let mut end = len;
         while end > 0 {
             let (length, code) = steps[end];
             if length == 0 {
                 end -= 1;
-                tokens.push(Token::Literal([0, s[end], 0, 255]));
+                tokens.push(Token::Literal([0, s[start + end], 0, 255]));
             } else {
                 end -= usize::from(length);
                 tokens.push(Token::Copy {
@@ -757,31 +1332,140 @@ impl<'a> Matcher<'a> {
         tokens.reverse();
         tokens
     }
+
+    /// Parse every segment in parallel and join the tokens.
+    fn parse_all(&self, prices: &[Pricing], meta: Option<&MetaCodes>) -> Vec<Token> {
+        let length_steps: Vec<usize> = (1..=MAX_COPY_LENGTH)
+            .filter(|&l| {
+                l <= EXACT_LENGTHS
+                    || l == MAX_COPY_LENGTH
+                    || prefix_encode(l).0 != prefix_encode(l + 1).0
+            })
+            .collect();
+        self.segments
+            .par_iter()
+            .map(|segment| self.parse(segment, prices, meta, &length_steps))
+            .collect::<Vec<_>>()
+            .concat()
+    }
 }
 
-/// Tokens for the bundled index stream: the smallest of several optimal parses, each priced with
-/// the statistics of the previous one.
+/// A cost model with the derived costs of the tracked distance groups.
+#[derive(Debug)]
+struct Pricing {
+    model: CostModel,
+    group_costs: Vec<f32>,
+    /// Tracked groups by ascending distance cost.
+    group_order: Vec<usize>,
+}
+
+/// Hash-chain matches at the positions of `range` that beat every tracked neighborhood match,
+/// none running past the end of `range`.
+fn search_segment(
+    symbols: &[u8],
+    tracked: &[(usize, usize)],
+    neighbor_codes: &[u8],
+    chain: &[u32],
+    range: Range<usize>,
+) -> Segment {
+    let Range { start, end: n } = range;
+    let mut longest_tracked = vec![0u16; n - start];
+    let mut runs = vec![0usize; tracked.len()];
+    for i in (start..n).rev() {
+        let symbol = Some(&symbols[i]);
+        let mut longest = 0;
+        for (run, &(distance, _)) in runs.iter_mut().zip(tracked) {
+            let matches = usize::from(symbols.get(i.wrapping_sub(distance)) == symbol);
+            *run = (*run + 1).min(MAX_COPY_LENGTH) * matches;
+            longest = longest.max(*run);
+        }
+        longest_tracked[i - start] = longest as u16;
+    }
+
+    let mut chain_matches = Vec::new();
+    let mut chain_starts = Vec::with_capacity(n - start + 1);
+    for i in start..n {
+        chain_starts.push(chain_matches.len() as u32);
+        let max_length = (n - i).min(MAX_COPY_LENGTH);
+        let limit = max_length.min(LONG_MATCH);
+        let mut longest = usize::from(longest_tracked[i - start]);
+        let mut j = chain[i];
+        for _ in 0..CHAIN_LIMIT {
+            if j == NO_POSITION || longest >= limit {
+                break;
+            }
+            let candidate = j as usize;
+            let distance = i - candidate;
+            if distance > WINDOW {
+                break;
+            }
+            let code = match neighbor_codes.get(distance) {
+                Some(&code) if code != 0 => usize::from(code),
+                _ => distance + NEIGHBORHOOD_CODES,
+            };
+            if code > TRACKED_CODES && symbols[candidate + longest] == symbols[i + longest] {
+                let length = symbols[i..i + max_length]
+                    .iter()
+                    .zip(&symbols[candidate..])
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                if length > longest && length >= 3 {
+                    longest = length;
+                    chain_matches.push((length as u16, code as u32));
+                }
+            }
+            j = chain[candidate];
+        }
+    }
+    chain_starts.push(chain_matches.len() as u32);
+    Segment {
+        range,
+        chain_matches,
+        chain_starts,
+    }
+}
+
+/// Tokens for a symbol stream laid out in rows of `xsize`: the smallest of several optimal parses,
+/// each priced with the statistics of the previous one.
 fn backward_references(symbols: &[u8], xsize: usize) -> Vec<Token> {
     let matcher = Matcher::new(symbols, xsize);
-    let length_steps: Vec<usize> = (1..=MAX_COPY_LENGTH)
-        .filter(|&l| {
-            l <= EXACT_LENGTHS
-                || l == MAX_COPY_LENGTH
-                || prefix_encode(l).0 != prefix_encode(l + 1).0
-        })
-        .collect();
-    let mut model = CostModel::initial(symbols);
+    let mut pricing = matcher.price(CostModel::initial(symbols));
     let mut best: Option<(u64, Vec<Token>)> = None;
     for _ in 0..PARSE_PASSES {
-        let tokens = matcher.parse(&model, &length_steps);
+        let tokens = matcher.parse_all(std::slice::from_ref(&pricing), None);
         let histograms = Histograms::new(&tokens);
         let bits = histograms.coded_bits();
-        model = CostModel::new(&histograms.green, &histograms.distance);
+        pricing = matcher.price(CostModel::new(&histograms.green, &histograms.distance));
         if best.as_ref().is_none_or(|(best_bits, _)| bits < *best_bits) {
             best = Some((bits, tokens));
         }
     }
     best.map_or_else(Vec::new, |(_, tokens)| tokens)
+}
+
+/// Tokens and meta prefix codes for the main image, `symbols` laid out in rows of `xsize`.
+///
+/// A first parse priced with global statistics plans the meta prefix codes; the second parse
+/// prices every position with the statistics of its tile's group (or globally again when one set
+/// of codes is smallest), and the smaller of the two parses is kept.
+fn main_image(symbols: &[u8], xsize: usize, ysize: usize) -> (Vec<Token>, Option<MetaCodes>) {
+    let matcher = Matcher::new(symbols, xsize);
+    let tokens = matcher.parse_all(&[matcher.price(CostModel::initial(symbols))], None);
+    let (bits, meta) = plan_meta_codes(&tokens, xsize, ysize);
+    let histograms = match &meta {
+        Some(meta) => meta.histograms(&tokens, &meta.token_groups(&tokens, xsize)),
+        None => vec![Histograms::new(&tokens)],
+    };
+    let prices: Vec<Pricing> = histograms
+        .iter()
+        .map(|h| matcher.price(CostModel::new(&h.green, &h.distance)))
+        .collect();
+    let refined = matcher.parse_all(&prices, meta.as_ref());
+    let refined_bits = meta.as_ref().map_or_else(
+        || 1 + entropy_coded_bits(&refined),
+        |meta| meta.total_bits(&refined, xsize),
+    );
+    (if refined_bits < bits { refined } else { tokens }, meta)
 }
 
 /// Least-significant-bit-first bit writer.
@@ -802,6 +1486,10 @@ impl BitWriter {
             self.pending >>= 8;
             self.pending_bits -= 8;
         }
+    }
+
+    fn len_bits(&self) -> u64 {
+        self.bytes.len() as u64 * 8 + u64::from(self.pending_bits)
     }
 
     fn finish(mut self) -> Vec<u8> {
@@ -904,6 +1592,60 @@ mod tests {
             indexed.len(),
             argb.len()
         );
+    }
+
+    #[test]
+    fn regions_with_different_statistics_get_meta_prefix_codes() {
+        let img = RgbaImage::from_fn(768, 512, |x, y| {
+            let density = [2, 3, 5, 9, 17, 40][(x / 128) as usize] + (y / 256) * 7;
+            let hash = (x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA6B)) >> 9;
+            let on = hash.wrapping_mul(0xC2B2_AE35) % density == 0;
+            Rgba(if on {
+                [250, 250, 240, 255]
+            } else {
+                [10, 10, 20, 255]
+            })
+        });
+        let bytes = round_trip(&img);
+        let palette = [[10, 10, 20, 255], [250, 250, 240, 255]];
+        let (indices, xsize) = bundle_indices(&img, &palette, 3);
+        let (tokens, meta) = main_image(&indices, xsize, 512);
+        let meta = meta.expect("regions should get their own prefix codes");
+        assert!(meta.tile_groups.iter().any(|&g| g > 0));
+        let mut single = BitWriter::default();
+        write_entropy_coded_image(&mut single, &tokens);
+        assert!(
+            bytes.len() * 8 < single.len_bits() as usize,
+            "meta codes should be smaller"
+        );
+    }
+
+    #[test]
+    fn encoding_is_deterministic_across_thread_counts() {
+        let img = palette_image(1500, 300, 9, 5);
+        let reference = encode_lossless(&img).unwrap();
+        for threads in [1, 3] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            assert_eq!(pool.install(|| encode_lossless(&img).unwrap()), reference);
+        }
+    }
+
+    #[test]
+    fn portable_log2_matches_exact_values() {
+        for exponent in 0..64 {
+            assert_eq!(log2(1 << exponent), f64::from(exponent));
+        }
+        for (x, expected) in [
+            (3, 1.584_962_500_721_156),
+            (10, std::f64::consts::LOG2_10),
+            (1_000_003, 19.931_572_897_402_805),
+        ] {
+            assert!((log2(x) - expected).abs() < 1e-9, "log2({x}) = {}", log2(x));
+            assert_eq!(log2_count(x), log2(x));
+        }
     }
 
     #[test]
