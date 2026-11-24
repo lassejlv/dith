@@ -325,6 +325,37 @@ fn corpus() -> Vec<Case> {
             "apng",
             &format!("animate {PHOTO} -o {{out}} --frames 4 --temporal boil -a stucki -p bw"),
         ),
+        Case::new(
+            "animate/photo-boil-webp",
+            "webp",
+            &format!(
+                "animate {PHOTO} -o {{out}} --frames 4 --temporal boil -a atkinson -p risograph-duo"
+            ),
+        ),
+        anim("sphere-webp", "webp", "--pattern sphere --preset risograph"),
+        anim(
+            "rings-webp-cycle",
+            "webp",
+            "--pattern rings -a bayer8 -p pico8 --cycle-palette --ping-pong",
+        ),
+    ]);
+
+    cases.extend([
+        Case::new(
+            "plot/photo-svg",
+            "svg",
+            &format!("plot {PHOTO} -o {{out}} -n 600 --paper a6 --edges 0.8"),
+        ),
+        Case::new(
+            "plot/sphere-gcode",
+            "gcode",
+            "plot sphere -o {out} -n 400 --paper a6 --dot circle",
+        ),
+        Case::new(
+            "plot/mesh-multipen-svg",
+            "svg",
+            "plot mesh -o {out} -n 500 --paper a6 --palette risograph-duo",
+        ),
     ]);
 
     cases.extend([

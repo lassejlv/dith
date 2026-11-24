@@ -146,6 +146,11 @@
       "bytes": 5801,
       "sha256": "ce8ec2f1aaccf82c42e5cc0eb2a8e7c280ea78ad87564c5a52d62a16cf670fdc"
     },
+    "animate/photo-boil-webp": {
+      "command": "dith animate tests/golden/fixtures/photo.png -o animate-photo-boil-webp.webp --frames 4 --temporal boil -a atkinson -p risograph-duo",
+      "bytes": 4654,
+      "sha256": "12ae6f189fdf9127132ee8cbf8d0a624797a5a7da8f375ed4e1f2175dcd9fe40"
+    },
     "animate/plasma-spritesheet": {
       "command": "dith animate -o animate-plasma-spritesheet.png --canvas-width 64 --canvas-height 48 --frames 6 --pattern plasma --preset vapor-mesh --anim-format spritesheet --sheet-cols 3",
       "bytes": 1040,
@@ -156,10 +161,20 @@
       "bytes": 8422,
       "sha256": "969514b1c573156d00c9c5f6b8296d4690466646ca557b1a9c5a41a16f299a58"
     },
+    "animate/rings-webp-cycle": {
+      "command": "dith animate -o animate-rings-webp-cycle.webp --canvas-width 64 --canvas-height 48 --frames 6 --pattern rings -a bayer8 -p pico8 --cycle-palette --ping-pong",
+      "bytes": 8056,
+      "sha256": "a72ea969c411a7a10962df714d83f23e6e0f952e3b1695cb825977229ad7ac75"
+    },
     "animate/sphere-gif": {
       "command": "dith animate -o animate-sphere-gif.gif --canvas-width 64 --canvas-height 48 --frames 6 --pattern sphere --preset risograph",
       "bytes": 1038,
       "sha256": "903a4da0ba4fa6de37a5582a734ee9b9fa67b601bf5ec28d7ba646a638e49b52"
+    },
+    "animate/sphere-webp": {
+      "command": "dith animate -o animate-sphere-webp.webp --canvas-width 64 --canvas-height 48 --frames 6 --pattern sphere --preset risograph",
+      "bytes": 1154,
+      "sha256": "c7fd6570c64963c1da41dac307a0e7c5da9b3c90e60a760cba6efa31dea50192"
     },
     "animate/waves-apng": {
       "command": "dith animate -o animate-waves-apng.apng --canvas-width 64 --canvas-height 48 --frames 6 --pattern waves -a bayer4 -p gameboy --easing ease-in-out",
@@ -273,13 +288,13 @@
     },
     "format/webp": {
       "command": "dith apply tests/golden/fixtures/photo.png -o format-webp.webp --preset risograph-duo",
-      "bytes": 416,
-      "sha256": "1693442994af8435126551aa33d398c0d010faa8d43c4be8769989f49b2b608f"
+      "bytes": 418,
+      "sha256": "789c78238df95ce43590b490142983d3705690809c7ebee64a20757eb54f072b"
     },
     "format/webp-many-colors": {
       "command": "dith apply tests/golden/fixtures/photo.png -o format-webp-many-colors.webp --auto-palette 12 -a atkinson",
-      "bytes": 1136,
-      "sha256": "3ac64ab3ceb2d8df8873cebd6de626f1b8216008114f7eea3f1add5d4e29f65c"
+      "bytes": 1142,
+      "sha256": "1b0daded920c5697546d420684071b0d1e19d2c6f43179cef794eb78197e1cb5"
     },
     "generate/checkerboard": {
       "command": "dith generate checkerboard -o generate-checkerboard.png --canvas-width 160 --canvas-height 120",
@@ -330,6 +345,21 @@
       "command": "dith generate waves -o generate-waves.png --canvas-width 160 --canvas-height 120",
       "bytes": 1872,
       "sha256": "b55881840ca6eda888f3a194121476e07e566a6e27c32235859645402f09e9f7"
+    },
+    "plot/mesh-multipen-svg": {
+      "command": "dith plot mesh -o plot-mesh-multipen-svg.svg -n 500 --paper a6 --palette risograph-duo",
+      "bytes": 8371,
+      "sha256": "7f402b50cef6ba08fe1aae01b29e335240fd377330ef9df763030496982ca510"
+    },
+    "plot/photo-svg": {
+      "command": "dith plot tests/golden/fixtures/photo.png -o plot-photo-svg.svg -n 600 --paper a6 --edges 0.8",
+      "bytes": 9822,
+      "sha256": "7af1285dce851fcde574497f0fe64771722acea8c09d8e7550dcd3e96d6d01d6"
+    },
+    "plot/sphere-gcode": {
+      "command": "dith plot sphere -o plot-sphere-gcode.gcode -n 400 --paper a6 --dot circle",
+      "bytes": 31923,
+      "sha256": "2dd30fbefab081b3f27c554193fc4f322e4695feb4f55bee60d8fe159135b72a"
     },
     "preprocess/alpha-dither": {
       "command": "dith apply tests/golden/fixtures/alpha.png -o preprocess-alpha-dither.png -a floyd-steinberg -p gray8 --alpha-mode dither",
