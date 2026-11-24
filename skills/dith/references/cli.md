@@ -22,7 +22,7 @@ Every subcommand accepts `--json`. `dith <command> --help` is always authoritati
 ```sh
 # Prebuilt binary + agent skill (macOS Apple Silicon, Linux x86_64, Linux aarch64).
 # Asks before copying the skill into each detected agent; add `-s -- --yes` to skip the prompt.
-curl -fsSL https://raw.githubusercontent.com/lassejlv/dith/main/install.sh | bash
+curl -fsSL https://cdn.diths.design/install.sh | bash
 
 # Self-update from GitHub Releases (also refreshes the skill in detected agents)
 dith update --check --json     # only report whether a newer release exists

@@ -28,7 +28,7 @@ Prebuilt binaries are published for **macOS Apple Silicon (`aarch64-apple-darwin
 
 ```bash
 # Install binary + agent skill (macOS ARM / Linux x86_64 / Linux aarch64)
-curl -fsSL https://raw.githubusercontent.com/lassejlv/dith/main/install.sh | bash
+curl -fsSL https://cdn.diths.design/install.sh | bash
 
 # Update to the latest release anytime
 dith update
