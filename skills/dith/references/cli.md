@@ -20,7 +20,7 @@ Every subcommand accepts `--json`. `dith <command> --help` is always authoritati
 ## Install, update, or run from source
 
 ```sh
-# Prebuilt binary + agent skill (macOS Apple Silicon, Linux x86_64).
+# Prebuilt binary + agent skill (macOS Apple Silicon, Linux x86_64, Linux aarch64).
 # Asks before copying the skill into each detected agent; add `-s -- --yes` to skip the prompt.
 curl -fsSL https://raw.githubusercontent.com/lassejlv/dith/main/install.sh | bash
 
@@ -127,6 +127,7 @@ Choose one source.
 
 - `-f, --format png|webp|jpeg|gif|bmp|tiff|svg|kitty|braille|ascii`, inferred from the `-o` extension. Stdout (`-o -`) defaults to PNG.
 - SVG: `--svg-shape rect|circle|dot`, `--svg-skip-bg`
+- `--optimize`: smallest lossless PNG, APNG, spritesheet, and PNG frames (palette order and filter search plus Zopfli). Pixels are identical; encoding takes several times longer. Recorded in recipes as `export.optimize`.
 - Text: `--text-width <cols>` for braille and ascii
 - Kitty: `--view-cols`, `--view-rows`
 

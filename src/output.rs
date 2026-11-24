@@ -29,9 +29,9 @@ pub enum OutputFormat {
     Jpeg,
     /// Animated-capable GIF (crisp indexed output).
     Gif,
-    /// Uncompressed BMP.
+    /// Lossless BMP (palettized 1/4/8-bit when opaque with at most 256 colors).
     Bmp,
-    /// Lossless TIFF.
+    /// Lossless Deflate-compressed TIFF.
     Tiff,
     /// Crisp vector SVG (run-length merged rects or halftone circles/dots).
     Svg,
@@ -117,6 +117,9 @@ pub struct ExportOptions {
     pub view_cols: Option<u32>,
     /// Display height in terminal rows when rendering inline with Kitty graphics (`r=`).
     pub view_rows: Option<u32>,
+    /// Spend extra CPU on the smallest lossless PNG/APNG (palette, filter, and Zopfli search).
+    #[serde(default)]
+    pub optimize: bool,
 }
 
 /// Per-color usage statistics returned in structured JSON output.
@@ -223,9 +226,12 @@ pub fn encode_image(
         }
         OutputFormat::Braille => Ok(render_braille(img, export.text_width).into_bytes()),
         OutputFormat::Ascii => Ok(render_ascii(img, export.text_width).into_bytes()),
+        OutputFormat::Png if export.optimize => encode_optimized_png_bytes(img),
         OutputFormat::Png => encode_png_bytes(img),
         OutputFormat::Webp => crate::webp::encode_lossless(img),
-        OutputFormat::Jpeg | OutputFormat::Gif | OutputFormat::Bmp | OutputFormat::Tiff => {
+        OutputFormat::Bmp => encode_bmp(img),
+        OutputFormat::Tiff => encode_tiff(img),
+        OutputFormat::Jpeg | OutputFormat::Gif => {
             let dyn_img = if matches!(format, OutputFormat::Jpeg) {
                 DynamicImage::ImageRgba8(img.clone()).to_rgb8().into()
             } else {
@@ -234,15 +240,15 @@ pub fn encode_image(
             let img_fmt = match format {
                 OutputFormat::Jpeg => ImageFormat::Jpeg,
                 OutputFormat::Gif => ImageFormat::Gif,
-                OutputFormat::Bmp => ImageFormat::Bmp,
-                OutputFormat::Tiff => ImageFormat::Tiff,
                 OutputFormat::Png
                 | OutputFormat::Webp
+                | OutputFormat::Bmp
+                | OutputFormat::Tiff
                 | OutputFormat::Svg
                 | OutputFormat::Kitty
                 | OutputFormat::Braille
                 | OutputFormat::Ascii => {
-                    unreachable!("PNG, WebP, and text/terminal formats handled above")
+                    unreachable!("PNG, WebP, BMP, TIFF, and text/terminal formats handled above")
                 }
             };
             let mut cursor = Cursor::new(Vec::new());
@@ -270,8 +276,9 @@ pub fn write_output_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Render a dithered image as a compact, crisp SVG.
 ///
-/// `Rect` mode merges horizontal runs into one compact `<path>` per color; dot modes group
-/// `<circle>` elements by color `<g fill="...">`, so files stay lean for web and design tooling.
+/// `Rect` mode strokes each horizontal run as a 1px-wide line through the row centre, one
+/// `<path>` per color; dot modes trace every dot as two filled semicircle arcs in one `<path>`
+/// per color. Colors use the shortest hex form, so files stay lean for web and design tooling.
 #[must_use]
 pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
     let w = img.width();
@@ -313,8 +320,11 @@ pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
     if let Some(bg) = bg_color
         && !skip_bg
     {
-        let hex = Rgb::new(bg[0], bg[1], bg[2]).to_hex();
-        let _ = writeln!(out, "<rect width=\"{w}\" height=\"{h}\" fill=\"{hex}\"/>");
+        let _ = writeln!(
+            out,
+            "<rect width=\"{w}\" height=\"{h}\" fill=\"{}\"/>",
+            svg_hex(bg)
+        );
     }
 
     match shape {
@@ -334,29 +344,41 @@ pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
                         x += 1;
                     }
                     let run_w = x - start_x;
-                    let (d, last_x, last_y) = paths.entry(px.0).or_default();
-                    let dx = i64::from(start_x) - i64::from(*last_x);
-                    let dy = y - *last_y;
-                    let _ = write!(d, "m{dx} {dy}h{run_w}v1h-{run_w}z");
-                    (*last_x, *last_y) = (start_x, y);
+                    let (d, end_x, last_y) = paths.entry(px.0).or_default();
+                    if d.is_empty() {
+                        let _ = write!(d, "M{start_x} {y}.5h{run_w}");
+                    } else {
+                        let dx = i64::from(start_x) - i64::from(*end_x);
+                        let dy = y - *last_y;
+                        let _ = write!(d, "m{dx} {dy}h{run_w}");
+                    }
+                    (*end_x, *last_y) = (x, y);
                 }
             }
-            for (rgba, (d, _, _)) in paths {
-                let hex = Rgb::new(rgba[0], rgba[1], rgba[2]).to_hex();
-                let _ = write!(out, "<path fill=\"{hex}\"");
-                if rgba[3] < 255 {
-                    let _ = write!(out, " fill-opacity=\"{:.2}\"", f32::from(rgba[3]) / 255.0);
+            if !paths.is_empty() {
+                out.push_str("<g fill=\"none\">\n");
+                for (rgba, (d, _, _)) in paths {
+                    let _ = write!(
+                        out,
+                        "<path stroke=\"{}\"",
+                        svg_hex([rgba[0], rgba[1], rgba[2]])
+                    );
+                    if rgba[3] < 255 {
+                        let _ =
+                            write!(out, " stroke-opacity=\"{:.2}\"", f32::from(rgba[3]) / 255.0);
+                    }
+                    let _ = writeln!(out, " d=\"{d}\"/>");
                 }
-                let _ = writeln!(out, " d=\"{d}\"/>");
+                out.push_str("</g>\n");
             }
         }
         SvgShape::Circle | SvgShape::Dot => {
-            let radius = if shape == SvgShape::Circle {
-                ".48"
+            let (left, arcs) = if shape == SvgShape::Circle {
+                (".02", "a.48.48 0 1 0 .96 0 .48.48 0 1 0-.96 0")
             } else {
-                ".38"
+                (".12", "a.38.38 0 1 0 .76 0 .38.38 0 1 0-.76 0")
             };
-            let mut color_groups: BTreeMap<[u8; 3], String> = BTreeMap::new();
+            let mut dots: BTreeMap<[u8; 3], (String, u32, u32)> = BTreeMap::new();
             for y in 0..h {
                 for x in 0..w {
                     let px = *img.get_pixel(x, y);
@@ -364,19 +386,34 @@ pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
                     if px[3] == 0 || bg_color == Some(rgb) {
                         continue;
                     }
-                    let entry = color_groups.entry(rgb).or_default();
-                    let _ = write!(entry, "<circle cx=\"{x}.5\" cy=\"{y}.5\" r=\"{radius}\"/>");
+                    let (d, last_x, last_y) = dots.entry(rgb).or_default();
+                    if d.is_empty() {
+                        let _ = write!(d, "M{x}{left} {y}.5{arcs}");
+                    } else {
+                        let dx = i64::from(x) - i64::from(*last_x);
+                        let dy = y - *last_y;
+                        let _ = write!(d, "m{dx} {dy}{arcs}");
+                    }
+                    (*last_x, *last_y) = (x, y);
                 }
             }
-            for (rgb, body) in color_groups {
-                let hex = Rgb::new(rgb[0], rgb[1], rgb[2]).to_hex();
-                let _ = writeln!(out, "<g fill=\"{hex}\">{body}</g>");
+            for (rgb, (d, _, _)) in dots {
+                let _ = writeln!(out, "<path fill=\"{}\" d=\"{d}\"/>", svg_hex(rgb));
             }
         }
     }
 
     out.push_str("</svg>\n");
     out
+}
+
+/// Format a color as the shortest SVG hex literal, `#rgb` when every channel repeats its nibble.
+fn svg_hex([r, g, b]: [u8; 3]) -> String {
+    if [r, g, b].iter().all(|c| c >> 4 == c & 0xf) {
+        format!("#{:x}{:x}{:x}", r & 0xf, g & 0xf, b & 0xf)
+    } else {
+        Rgb::new(r, g, b).to_hex()
+    }
 }
 
 /// Render an image as high-resolution Unicode Braille characters (`U+2800..U+28FF`, 2x4 subpixels).
@@ -555,6 +592,15 @@ pub fn encode_png_bytes(img: &RgbaImage) -> Result<Vec<u8>> {
     encode_png(img, png::Compression::High)
 }
 
+/// Like [`encode_png_bytes`], but spends far more CPU for the smallest possible file: the palette
+/// order and PNG filter strategy are searched, and the image data is compressed with Zopfli.
+///
+/// # Errors
+/// Returns an error if PNG encoding fails.
+pub fn encode_optimized_png_bytes(img: &RgbaImage) -> Result<Vec<u8>> {
+    crate::png_optimize::recompress(&encode_png(img, png::Compression::NoCompression)?)
+}
+
 /// Fast lossless PNG encoding tailored for live interactive Kitty graphics previews.
 ///
 /// Uses the same compact layout as [`encode_png_bytes`] with much cheaper DEFLATE settings.
@@ -577,6 +623,103 @@ fn encode_png(img: &RgbaImage, compression: png::Compression) -> Result<Vec<u8>>
             .context("writing PNG pixel data")?;
     }
     Ok(out)
+}
+
+/// Encode `img` as the most compact exact BMP: a 1-, 4-, or 8-bit palette when it is opaque with at
+/// most 256 colors, else 24-bit RGB when opaque, else 32-bit BGRA.
+fn encode_bmp(img: &RgbaImage) -> Result<Vec<u8>> {
+    let layout = PngLayout::for_images([img]);
+    if let PngLayout::Indexed(palette) = &layout
+        && palette.iter().all(|c| c[3] == 255)
+    {
+        return Ok(encode_indexed_bmp(img, palette));
+    }
+    let (pixels, _) = img.as_raw().as_chunks::<4>();
+    let (data, color) = if matches!(layout, PngLayout::Rgb) {
+        let rgb: Vec<u8> = pixels.iter().flat_map(|px| [px[0], px[1], px[2]]).collect();
+        (rgb, image::ExtendedColorType::Rgb8)
+    } else {
+        (img.as_raw().clone(), image::ExtendedColorType::Rgba8)
+    };
+    let mut out = Vec::new();
+    image::codecs::bmp::BmpEncoder::new(&mut out)
+        .encode(&data, img.width(), img.height(), color)
+        .context("encoding bmp output")?;
+    Ok(out)
+}
+
+/// Write an uncompressed bottom-up palettized BMP (`BITMAPINFOHEADER`) at the smallest bit depth
+/// BMP supports for `palette` (1, 4, or 8 bits per pixel).
+fn encode_indexed_bmp(img: &RgbaImage, palette: &[[u8; 4]]) -> Vec<u8> {
+    const HEADERS_SIZE: usize = 14 + 40;
+    let depth: usize = match palette.len() {
+        0..=2 => 1,
+        3..=16 => 4,
+        _ => 8,
+    };
+    let lookup: HashMap<[u8; 4], u8> = palette
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (c, i as u8))
+        .collect();
+    let width = img.width() as usize;
+    let per_byte = 8 / depth;
+    let row_len = width.div_ceil(per_byte).next_multiple_of(4);
+    let pixel_offset = HEADERS_SIZE + palette.len() * 4;
+    let image_size = row_len * img.height() as usize;
+
+    let mut out = Vec::with_capacity(pixel_offset + image_size);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&((pixel_offset + image_size) as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(pixel_offset as u32).to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&img.width().to_le_bytes());
+    out.extend_from_slice(&img.height().to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&(depth as u16).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(image_size as u32).to_le_bytes());
+    out.extend_from_slice(&[0; 8]);
+    out.extend_from_slice(&(palette.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for c in palette {
+        out.extend_from_slice(&[c[2], c[1], c[0], 0]);
+    }
+    let (pixels, _) = img.as_raw().as_chunks::<4>();
+    for row in pixels.chunks(width.max(1)).rev() {
+        let start = out.len();
+        out.resize(start + row_len, 0);
+        for (x, px) in row.iter().enumerate() {
+            out[start + x / per_byte] |= lookup[px] << (8 - depth * (x % per_byte + 1));
+        }
+    }
+    out
+}
+
+/// Encode `img` as a Deflate-compressed TIFF in the smallest exact sample layout: 8-bit gray when
+/// it is opaque and colorless, else RGB when opaque, else RGBA.
+fn encode_tiff(img: &RgbaImage) -> Result<Vec<u8>> {
+    use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
+
+    let (width, height) = img.dimensions();
+    let (pixels, _) = img.as_raw().as_chunks::<4>();
+    let opaque = pixels.iter().all(|px| px[3] == 255);
+    let mut out = Cursor::new(Vec::new());
+    let mut encoder = TiffEncoder::new(&mut out)
+        .context("encoding tiff output")?
+        .with_compression(Compression::Deflate(DeflateLevel::Best));
+    if opaque && pixels.iter().all(|px| px[0] == px[1] && px[1] == px[2]) {
+        let gray: Vec<u8> = pixels.iter().map(|px| px[0]).collect();
+        encoder.write_image::<colortype::Gray8>(width, height, &gray)
+    } else if opaque {
+        let rgb: Vec<u8> = pixels.iter().flat_map(|px| [px[0], px[1], px[2]]).collect();
+        encoder.write_image::<colortype::RGB8>(width, height, &rgb)
+    } else {
+        encoder.write_image::<colortype::RGBA8>(width, height, img.as_raw())
+    }
+    .context("encoding tiff output")?;
+    Ok(out.into_inner())
 }
 
 /// The most compact exact PNG pixel layout for a set of images (one still, or every animation frame).
@@ -809,9 +952,47 @@ mod tests {
         for x in 2..6 {
             img.put_pixel(x, 0, Rgba([0, 0, 0, 255]));
         }
+        for x in 1..3 {
+            img.put_pixel(x, 1, Rgba([0, 0, 0, 255]));
+        }
         let svg = render_svg(&img, SvgShape::Rect, false);
-        assert!(svg.contains("m2 0h4v1h-4z"), "expected RLE run: {svg}");
-        assert!(svg.contains("fill=\"#000000\""));
+        assert!(
+            svg.contains("<rect width=\"8\" height=\"2\" fill=\"#fff\"/>"),
+            "{svg}"
+        );
+        assert!(
+            svg.contains("<path stroke=\"#000\" d=\"M2 0.5h4m-5 1h2\"/>"),
+            "expected stroked RLE runs: {svg}"
+        );
+
+        img.put_pixel(7, 1, Rgba([0x12, 0x34, 0x56, 128]));
+        let svg = render_svg(&img, SvgShape::Rect, false);
+        assert!(
+            svg.contains("<path stroke=\"#123456\" stroke-opacity=\"0.50\" d=\"M7 1.5h1\"/>"),
+            "expected translucent run: {svg}"
+        );
+    }
+
+    #[test]
+    fn svg_dot_export_traces_each_dot_as_filled_arcs() {
+        let mut img = RgbaImage::from_pixel(4, 3, Rgba([255, 255, 255, 255]));
+        img.put_pixel(1, 0, Rgba([0xaa, 0xbb, 0xcc, 255]));
+        img.put_pixel(3, 0, Rgba([0xaa, 0xbb, 0xcc, 255]));
+        img.put_pixel(0, 2, Rgba([0xaa, 0xbb, 0xcc, 255]));
+        let arcs = "a.48.48 0 1 0 .96 0 .48.48 0 1 0-.96 0";
+        let svg = render_svg(&img, SvgShape::Circle, true);
+        assert!(!svg.contains("<rect"), "{svg}");
+        assert!(
+            svg.contains(&format!(
+                "<path fill=\"#abc\" d=\"M1.02 0.5{arcs}m2 0{arcs}m-3 2{arcs}\"/>"
+            )),
+            "expected one arc pair per dot: {svg}"
+        );
+        let dot = render_svg(&img, SvgShape::Dot, true);
+        assert!(
+            dot.contains("d=\"M1.12 0.5a.38.38 0 1 0 .76 0 .38.38 0 1 0-.76 0m2 0a.38"),
+            "{dot}"
+        );
     }
 
     #[test]
@@ -864,6 +1045,68 @@ mod tests {
         let (layout, decoded) = decode(&photo);
         assert_eq!(layout, (png::ColorType::Rgb, png::BitDepth::Eight, false));
         assert_eq!(decoded, photo);
+    }
+
+    fn layout_samples() -> Vec<RgbaImage> {
+        let mut two_tone = RgbaImage::from_pixel(13, 5, Rgba([244, 240, 228, 255]));
+        two_tone.put_pixel(12, 4, Rgba([26, 43, 140, 255]));
+        let mut cutout = two_tone.clone();
+        cutout.put_pixel(0, 0, Rgba([0, 0, 0, 0]));
+        cutout.put_pixel(1, 0, Rgba([9, 9, 9, 100]));
+        let tones = |n: u32| {
+            RgbaImage::from_fn(37, 23, move |x, y| {
+                let i = ((x * 7 + y * 3) % n) as u8;
+                Rgba([i * 11, 255 - i * 5, i, 255])
+            })
+        };
+        let photo = RgbaImage::from_fn(32, 32, |x, y| Rgba([(x * 8) as u8, (y * 8) as u8, 7, 255]));
+        let translucent =
+            RgbaImage::from_fn(32, 32, |x, y| Rgba([(x * 8) as u8, 90, 7, (y * 8) as u8]));
+        let gray = RgbaImage::from_fn(30, 20, |x, y| {
+            let v = if (x + y) % 3 == 0 { 0 } else { 200 };
+            Rgba([v, v, v, 255])
+        });
+        vec![
+            two_tone,
+            cutout,
+            tones(5),
+            tones(20),
+            photo,
+            translucent,
+            gray,
+        ]
+    }
+
+    #[test]
+    fn optimized_png_round_trips_and_never_grows() {
+        for img in layout_samples() {
+            let optimized = encode_optimized_png_bytes(&img).unwrap();
+            assert_eq!(image::load_from_memory(&optimized).unwrap().to_rgba8(), img);
+            assert!(optimized.len() <= encode_png_bytes(&img).unwrap().len());
+        }
+    }
+
+    #[test]
+    fn bmp_uses_smallest_exact_layout() {
+        let bits_per_pixel: Vec<u16> = layout_samples()
+            .iter()
+            .map(|img| {
+                let bytes =
+                    encode_image(img, OutputFormat::Bmp, &ExportOptions::default()).unwrap();
+                assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgba8(), *img);
+                u16::from_le_bytes([bytes[28], bytes[29]])
+            })
+            .collect();
+        assert_eq!(bits_per_pixel, [1, 32, 4, 8, 24, 32, 1]);
+    }
+
+    #[test]
+    fn tiff_is_deflate_compressed_and_exact() {
+        for img in layout_samples() {
+            let bytes = encode_image(&img, OutputFormat::Tiff, &ExportOptions::default()).unwrap();
+            assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgba8(), img);
+            assert!(bytes.len() < img.as_raw().len());
+        }
     }
 
     #[test]
