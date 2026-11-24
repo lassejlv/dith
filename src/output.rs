@@ -275,8 +275,9 @@ pub fn write_output_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Render a dithered image as a compact, crisp SVG.
 ///
-/// `Rect` mode merges horizontal runs into one compact `<path>` per color; dot modes group
-/// `<circle>` elements by color `<g fill="...">`, so files stay lean for web and design tooling.
+/// `Rect` mode strokes each horizontal run as a 1px-wide line through the row centre, one
+/// `<path>` per color; dot modes trace every dot as two filled semicircle arcs in one `<path>`
+/// per color. Colors use the shortest hex form, so files stay lean for web and design tooling.
 #[must_use]
 pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
     let w = img.width();
@@ -318,8 +319,11 @@ pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
     if let Some(bg) = bg_color
         && !skip_bg
     {
-        let hex = Rgb::new(bg[0], bg[1], bg[2]).to_hex();
-        let _ = writeln!(out, "<rect width=\"{w}\" height=\"{h}\" fill=\"{hex}\"/>");
+        let _ = writeln!(
+            out,
+            "<rect width=\"{w}\" height=\"{h}\" fill=\"{}\"/>",
+            svg_hex(bg)
+        );
     }
 
     match shape {
@@ -339,29 +343,41 @@ pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
                         x += 1;
                     }
                     let run_w = x - start_x;
-                    let (d, last_x, last_y) = paths.entry(px.0).or_default();
-                    let dx = i64::from(start_x) - i64::from(*last_x);
-                    let dy = y - *last_y;
-                    let _ = write!(d, "m{dx} {dy}h{run_w}v1h-{run_w}z");
-                    (*last_x, *last_y) = (start_x, y);
+                    let (d, end_x, last_y) = paths.entry(px.0).or_default();
+                    if d.is_empty() {
+                        let _ = write!(d, "M{start_x} {y}.5h{run_w}");
+                    } else {
+                        let dx = i64::from(start_x) - i64::from(*end_x);
+                        let dy = y - *last_y;
+                        let _ = write!(d, "m{dx} {dy}h{run_w}");
+                    }
+                    (*end_x, *last_y) = (x, y);
                 }
             }
-            for (rgba, (d, _, _)) in paths {
-                let hex = Rgb::new(rgba[0], rgba[1], rgba[2]).to_hex();
-                let _ = write!(out, "<path fill=\"{hex}\"");
-                if rgba[3] < 255 {
-                    let _ = write!(out, " fill-opacity=\"{:.2}\"", f32::from(rgba[3]) / 255.0);
+            if !paths.is_empty() {
+                out.push_str("<g fill=\"none\">\n");
+                for (rgba, (d, _, _)) in paths {
+                    let _ = write!(
+                        out,
+                        "<path stroke=\"{}\"",
+                        svg_hex([rgba[0], rgba[1], rgba[2]])
+                    );
+                    if rgba[3] < 255 {
+                        let _ =
+                            write!(out, " stroke-opacity=\"{:.2}\"", f32::from(rgba[3]) / 255.0);
+                    }
+                    let _ = writeln!(out, " d=\"{d}\"/>");
                 }
-                let _ = writeln!(out, " d=\"{d}\"/>");
+                out.push_str("</g>\n");
             }
         }
         SvgShape::Circle | SvgShape::Dot => {
-            let radius = if shape == SvgShape::Circle {
-                ".48"
+            let (left, arcs) = if shape == SvgShape::Circle {
+                (".02", "a.48.48 0 1 0 .96 0 .48.48 0 1 0-.96 0")
             } else {
-                ".38"
+                (".12", "a.38.38 0 1 0 .76 0 .38.38 0 1 0-.76 0")
             };
-            let mut color_groups: BTreeMap<[u8; 3], String> = BTreeMap::new();
+            let mut dots: BTreeMap<[u8; 3], (String, u32, u32)> = BTreeMap::new();
             for y in 0..h {
                 for x in 0..w {
                     let px = *img.get_pixel(x, y);
@@ -369,19 +385,34 @@ pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
                     if px[3] == 0 || bg_color == Some(rgb) {
                         continue;
                     }
-                    let entry = color_groups.entry(rgb).or_default();
-                    let _ = write!(entry, "<circle cx=\"{x}.5\" cy=\"{y}.5\" r=\"{radius}\"/>");
+                    let (d, last_x, last_y) = dots.entry(rgb).or_default();
+                    if d.is_empty() {
+                        let _ = write!(d, "M{x}{left} {y}.5{arcs}");
+                    } else {
+                        let dx = i64::from(x) - i64::from(*last_x);
+                        let dy = y - *last_y;
+                        let _ = write!(d, "m{dx} {dy}{arcs}");
+                    }
+                    (*last_x, *last_y) = (x, y);
                 }
             }
-            for (rgb, body) in color_groups {
-                let hex = Rgb::new(rgb[0], rgb[1], rgb[2]).to_hex();
-                let _ = writeln!(out, "<g fill=\"{hex}\">{body}</g>");
+            for (rgb, (d, _, _)) in dots {
+                let _ = writeln!(out, "<path fill=\"{}\" d=\"{d}\"/>", svg_hex(rgb));
             }
         }
     }
 
     out.push_str("</svg>\n");
     out
+}
+
+/// Format a color as the shortest SVG hex literal, `#rgb` when every channel repeats its nibble.
+fn svg_hex([r, g, b]: [u8; 3]) -> String {
+    if [r, g, b].iter().all(|c| c >> 4 == c & 0xf) {
+        format!("#{:x}{:x}{:x}", r & 0xf, g & 0xf, b & 0xf)
+    } else {
+        Rgb::new(r, g, b).to_hex()
+    }
 }
 
 /// Render an image as high-resolution Unicode Braille characters (`U+2800..U+28FF`, 2x4 subpixels).
@@ -920,9 +951,47 @@ mod tests {
         for x in 2..6 {
             img.put_pixel(x, 0, Rgba([0, 0, 0, 255]));
         }
+        for x in 1..3 {
+            img.put_pixel(x, 1, Rgba([0, 0, 0, 255]));
+        }
         let svg = render_svg(&img, SvgShape::Rect, false);
-        assert!(svg.contains("m2 0h4v1h-4z"), "expected RLE run: {svg}");
-        assert!(svg.contains("fill=\"#000000\""));
+        assert!(
+            svg.contains("<rect width=\"8\" height=\"2\" fill=\"#fff\"/>"),
+            "{svg}"
+        );
+        assert!(
+            svg.contains("<path stroke=\"#000\" d=\"M2 0.5h4m-5 1h2\"/>"),
+            "expected stroked RLE runs: {svg}"
+        );
+
+        img.put_pixel(7, 1, Rgba([0x12, 0x34, 0x56, 128]));
+        let svg = render_svg(&img, SvgShape::Rect, false);
+        assert!(
+            svg.contains("<path stroke=\"#123456\" stroke-opacity=\"0.50\" d=\"M7 1.5h1\"/>"),
+            "expected translucent run: {svg}"
+        );
+    }
+
+    #[test]
+    fn svg_dot_export_traces_each_dot_as_filled_arcs() {
+        let mut img = RgbaImage::from_pixel(4, 3, Rgba([255, 255, 255, 255]));
+        img.put_pixel(1, 0, Rgba([0xaa, 0xbb, 0xcc, 255]));
+        img.put_pixel(3, 0, Rgba([0xaa, 0xbb, 0xcc, 255]));
+        img.put_pixel(0, 2, Rgba([0xaa, 0xbb, 0xcc, 255]));
+        let arcs = "a.48.48 0 1 0 .96 0 .48.48 0 1 0-.96 0";
+        let svg = render_svg(&img, SvgShape::Circle, true);
+        assert!(!svg.contains("<rect"), "{svg}");
+        assert!(
+            svg.contains(&format!(
+                "<path fill=\"#abc\" d=\"M1.02 0.5{arcs}m2 0{arcs}m-3 2{arcs}\"/>"
+            )),
+            "expected one arc pair per dot: {svg}"
+        );
+        let dot = render_svg(&img, SvgShape::Dot, true);
+        assert!(
+            dot.contains("d=\"M1.12 0.5a.38.38 0 1 0 .76 0 .38.38 0 1 0-.76 0m2 0a.38"),
+            "{dot}"
+        );
     }
 
     #[test]
