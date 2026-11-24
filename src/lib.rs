@@ -3,6 +3,7 @@
 pub mod animate;
 pub mod cli;
 pub mod color;
+mod commands;
 pub mod compare;
 pub mod dither;
 pub mod generate;
