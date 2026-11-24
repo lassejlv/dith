@@ -8,6 +8,7 @@ use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::animate::AnimFormat;
 use crate::color::{ColorSpace, Rgb};
 use crate::dither::{Algorithm, AlgorithmInfo, DitherOptions, dither_image};
 use crate::generate::{Pattern, PatternInfo};
@@ -359,6 +360,7 @@ pub struct CapabilitiesManifest {
     pub generators: Vec<PatternInfo>,
     pub color_spaces: Vec<NamedDescription>,
     pub output_formats: Vec<NamedDescription>,
+    pub animation_formats: Vec<NamedDescription>,
     pub parameter_ranges: Vec<ParameterRange>,
     pub default_recipe: DitherRecipe,
 }
@@ -416,7 +418,7 @@ pub fn build_capabilities() -> CapabilitiesManifest {
             },
             CommandCapability {
                 name: "animate",
-                summary: "Create animated dithers (GIF, APNG, spritesheet, PNG frames, or live fullscreen --view) from procedural loops, GIFs, sequences, or boiled photos.",
+                summary: "Create animated dithers (GIF, APNG, animated WebP, spritesheet, PNG frames, or live fullscreen --view) from procedural loops, GIFs, sequences, or boiled photos.",
                 example: "dith animate sphere -o orb.gif --preset risograph --frames 24 --fps 16 --temporal locked --json",
             },
             CommandCapability {
@@ -485,7 +487,7 @@ pub fn build_capabilities() -> CapabilitiesManifest {
             },
             NamedDescription {
                 id: OutputFormat::Webp.id(),
-                description: "Compact web-ready WebP",
+                description: "Lossless palette-coded WebP, usually the smallest lossless file",
             },
             NamedDescription {
                 id: OutputFormat::Jpeg.id(),
@@ -520,6 +522,13 @@ pub fn build_capabilities() -> CapabilitiesManifest {
                 description: "Shaded ASCII text art",
             },
         ],
+        animation_formats: AnimFormat::ALL
+            .iter()
+            .map(|format| NamedDescription {
+                id: format.id(),
+                description: format.description(),
+            })
+            .collect(),
         parameter_ranges: vec![
             ParameterRange {
                 flag: "--strength",

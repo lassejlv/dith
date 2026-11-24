@@ -16,6 +16,7 @@ pub enum ListKind {
     Presets,
     Generators,
     Formats,
+    AnimFormats,
 }
 
 #[derive(Debug, Args)]
@@ -135,6 +136,16 @@ pub(crate) fn handle_list(args: &ListArgs, as_json: bool) -> Result<()> {
             } else {
                 for f in caps.output_formats {
                     println!("{:<10} {}", f.id, f.description);
+                }
+            }
+        }
+        ListKind::AnimFormats => {
+            let caps = build_capabilities();
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&caps.animation_formats)?);
+            } else {
+                for f in caps.animation_formats {
+                    println!("{:<12} {}", f.id, f.description);
                 }
             }
         }

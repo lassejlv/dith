@@ -742,6 +742,78 @@ fn catalogs_describe_generator_motion_and_algorithm_temporal_stability() {
 }
 
 #[test]
+fn animated_webp_is_inferred_listed_decodable_and_fits_max_size() {
+    use image::AnimationDecoder;
+
+    let dir = TempDir::new().unwrap();
+    let out = dir.path().join("orb.webp");
+    let out_s = out.to_str().unwrap();
+    let base = [
+        "animate",
+        "sphere",
+        "-o",
+        out_s,
+        "--preset",
+        "gameboy",
+        "--frames",
+        "8",
+        "--fps",
+        "10",
+        "--canvas-width",
+        "160",
+        "--canvas-height",
+        "120",
+        "--json",
+    ];
+    let (ok, report, err) = run_json(&base);
+    assert!(ok, "animate webp failed: {err}");
+    assert_eq!(report["anim_format"], "webp");
+    assert_eq!(report["frame_count"], 8);
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(report["bytes_written"].as_u64(), Some(bytes.len() as u64));
+    assert!(bytes.starts_with(b"RIFF") && &bytes[8..16] == b"WEBPVP8X");
+    let frames: Vec<image::Frame> =
+        image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(&bytes))
+            .unwrap()
+            .into_frames()
+            .collect_frames()
+            .unwrap();
+    assert_eq!(frames.len(), 8);
+    assert!(
+        frames
+            .iter()
+            .all(|f| f.delay().numer_denom_ms() == (100, 1))
+    );
+
+    let limit = (bytes.len() / 2).to_string();
+    let mut args = base.to_vec();
+    args.extend(["--max-size", &limit]);
+    let (ok, fit, err) = run_json(&args);
+    assert!(ok, "max-size webp failed: {err}");
+    assert!(fit["bytes_written"].as_u64().unwrap() <= bytes.len() as u64 / 2);
+    assert_eq!(fit["frame_count"], 8);
+
+    let (ok, formats, _) = run_json(&["list", "anim-formats", "--json"]);
+    assert!(ok);
+    assert!(
+        formats
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["id"] == "webp")
+    );
+    let (ok, caps, _) = run_json(&["capabilities"]);
+    assert!(ok);
+    assert!(
+        caps["animation_formats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["id"] == "webp")
+    );
+}
+
+#[test]
 fn animate_max_size_shrinks_frames_until_the_file_fits() {
     let dir = TempDir::new().unwrap();
     let out = dir.path().join("fit.gif");

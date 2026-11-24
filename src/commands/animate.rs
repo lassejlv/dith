@@ -10,8 +10,8 @@ use serde::Serialize;
 use crate::animate::{
     AnimDitherOptions, AnimFormat, AnimFrame, AnimatedOutput, Easing, FloatRange, ProceduralMotion,
     ScreenDrift, SweepMode, TemporalMode, U32Range, apply_holds, apply_ping_pong,
-    compose_spritesheet, decode_animated_frames, dither_animation_frames, encode_apng, encode_gif,
-    generate_procedural_frames, write_frames_directory,
+    compose_spritesheet, decode_animated_frames, dither_animation_frames, encode_animated_webp,
+    encode_apng, encode_gif, generate_procedural_frames, write_frames_directory,
 };
 use crate::cli::{DitherFlags, PreviewMode};
 use crate::color::{ColorSpace, Rgb};
@@ -36,7 +36,7 @@ pub struct AnimateArgs {
     #[arg(long, value_enum)]
     pub pattern: Option<Pattern>,
 
-    /// Output path (.gif, .apng, or .png sprite sheet). Optional when using --view or --frames-dir.
+    /// Output path (.gif, .apng, .webp, or .png sprite sheet). Optional when using --view or --frames-dir.
     #[arg(short = 'o', long, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
@@ -60,7 +60,7 @@ pub struct AnimateArgs {
     #[arg(long)]
     pub fps: Option<u32>,
 
-    /// Loop count for GIF / APNG (0 = infinite loop, default 0).
+    /// Loop count for GIF / APNG / WebP (0 = infinite loop, default 0).
     #[arg(long, default_value_t = 0)]
     pub loops: u16,
 
@@ -163,7 +163,7 @@ pub struct AnimateArgs {
     pub sheet_cols: Option<u32>,
 
     /// Maximum output file size, e.g. "2MB", "500KB", "1.5MiB", or plain bytes. Shrinks frame
-    /// dimensions (keeping frame count, fps, and look) until the GIF / APNG / spritesheet fits.
+    /// dimensions (keeping frame count, fps, and look) until the GIF / APNG / WebP / spritesheet fits.
     #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
     pub max_size: Option<u64>,
 
@@ -306,7 +306,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
     if args.output.is_none() && args.frames_dir.is_none() && !wants_view && !args.dry_run {
         return Err(RecipeError::Validation {
             field: "output",
-            reason: "pass -o <out.gif|out.apng|sheet.png>, --frames-dir <DIR>, or --view"
+            reason: "pass -o <out.gif|out.apng|out.webp|sheet.png>, --frames-dir <DIR>, or --view"
                 .to_string(),
         }
         .into());
@@ -369,7 +369,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
     if args.max_size.is_some() && (args.output.is_none() || anim_format == AnimFormat::Frames) {
         return Err(RecipeError::Validation {
             field: "max-size",
-            reason: "needs -o with a .gif, .apng, or spritesheet .png output".to_string(),
+            reason: "needs -o with a .gif, .apng, .webp, or spritesheet .png output".to_string(),
         }
         .into());
     }
@@ -531,6 +531,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
                 encode_apng(&anim.frames, u32::from(args.loops), recipe.export.optimize)?,
                 None,
             ),
+            AnimFormat::Webp => (encode_animated_webp(&anim.frames, args.loops)?, None),
             AnimFormat::Spritesheet => {
                 let (sheet, cols, rows) = compose_spritesheet(&anim.frames, args.sheet_cols);
                 (
