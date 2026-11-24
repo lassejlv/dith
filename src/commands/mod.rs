@@ -8,6 +8,7 @@ pub(crate) mod compare;
 pub(crate) mod generate;
 pub(crate) mod inspect;
 pub(crate) mod list;
+pub(crate) mod plot;
 pub(crate) mod preset;
 pub(crate) mod preview;
 pub(crate) mod shared;

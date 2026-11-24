@@ -14,6 +14,7 @@ Every subcommand accepts `--json`. `dith <command> --help` is always authoritati
 - [batch](#batch)
 - [preview](#preview)
 - [preset](#preset)
+- [plot](#plot) (pen plotters: stippled SVG and G-code)
 - [JSON reports](#json-reports)
 - [Errors and exit codes](#errors-and-exit-codes)
 
@@ -51,7 +52,8 @@ dith list presets --json                              # built-in + local presets
 dith list algorithms --category error-diffusion --json   # categories: error-diffusion, ordered, stochastic, baseline
 dith list palettes --tag print --json                 # tag substring, case-insensitive
 dith list generators --json
-dith list formats --json
+dith list formats --json                              # raster formats, then plot formats (svg, gcode)
+dith list papers --json                               # named paper sizes for dith plot
 dith inspect photo.png --colors 6 --json              # --colors 2..=16 dominant colors
 ```
 
@@ -286,6 +288,46 @@ dith preset delete <name> [--scope project|user | --dir DIR] --json
 - Lookup order: `$DITH_PRESETS_DIR`, then `.dith/presets/`, then `~/.config/dith/presets/`, then built-ins. A local preset with a built-in's name shadows the built-in.
 - From a render, `--save-preset <name> --preset-scope project|user` on `apply` or `generate` saves the resolved settings in one step.
 
+## plot
+
+```sh
+dith plot <INPUT|-|PATTERN> -o <out.svg|out.gcode|-> [options]
+```
+
+Weighted Voronoi stippling for pen plotters. Lloyd relaxation weights centroids by density^1.5, which keeps relaxed point density close to proportional to ink (plain density weights flatten small features such as eyes). It does not take the shared dither flags. The format comes from the extension (`.svg`; `.gcode`, `.nc`, `.ngc`, `.gc`, `.g`) or `-f/--format svg|gcode`.
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `-n, --points` | 5000 | 1..=1000000 across all pens. Conflicts with `--density`. |
+| `--density` | | Dots per cm² of solid ink (0.001..=10000), so the count follows paper size and image darkness. |
+| `--iterations` | 50 | Max Lloyd iterations (0..=1000; 0 = raw rejection samples). |
+| `--tolerance` | 0.02 | Stop once mean point movement per iteration is below this many raster px. |
+| `--resolution` | 1200 | Longest side of the density raster (64..=8192). Raise it for 50k+ points. |
+| `--seed` | 42 | Sampling seed (also seeds generators). |
+| `--edges` | 0.0 | Adds Sobel edge strength to the ink density (0..=4) so eyes, lips, and outlines get extra dots; 0.5..1.0 for portraits. |
+| `--cutoff` | 0.0 | Ink densities below this (0..=0.99) count as paper. |
+| `--invert`, `--brightness`, `--contrast`, `--gamma`, `--blur`, `--sharpen`, `--auto-levels` | off | Tone prep, same ranges as the dither flags. |
+| `-p, --palette` / `--colors` | black pen | Lightest colour = paper, every other colour = one pen layer (max 16). |
+| `--background` | lightest colour | Paper colour; makes every palette colour a pen. |
+| `--paper` | a4 | `a2`..`a6`, `letter`, `legal`, `tabloid`, or `WxH[mm\|cm\|in]` (10..=5000 mm per side). |
+| `--orientation` | auto | `auto` (landscape for wide sources and generators), `portrait`, `landscape`. |
+| `--margin` | 15 | mm on every side. |
+| `--fit` | contain | `contain` (whole image, centred) or `cover` (fill, centre-crop). Generators always fill. |
+| `--dot` | point | `point` (pen tap), `circle`, `stroke` (horizontal dash). |
+| `--pen-width` | 0.5 | mm; also the SVG stroke width. |
+| `--max-dot`, `--min-dot` | 1.2, = max | Outer dot diameter in mm for circle/stroke; scales with cell darkness when min < max. |
+| `--pen-up`, `--pen-down` | `G0 Z2`, `G1 Z0 F1000` | Raw G-code; `\n` separates lines. Servo example: `--pen-down "M3 S30" --pen-up M5`. |
+| `--pen-change` | `M0 ; change pen` | Emitted at home before every pen after the first. |
+| `--dwell` | 0 | Seconds after each pen-up/down (`G4 P<s>`, GRBL seconds), 0..=10. |
+| `--draw-feed`, `--travel-feed` | 3000, 6000 | mm/min; also drive `estimated_plot_seconds`. |
+| `--origin` | bottom-left | Where `X0 Y0` (home) is: `bottom-left` (+Y up), `top-left` (+Y down), `center`. |
+| `--no-optimize` | off | Keep the nearest-neighbour order (skip 2-opt). |
+| `--tour-time-limit` | 10 | Seconds of 2-opt before stopping (0 = no cap). |
+| `--angle`, `--frequency`, `--stops` | 135, 1.0, ramp | Generator shaping. |
+| `--no-clobber`, `--dry-run` | | `--dry-run` plans layout and point count without stippling. |
+
+SVG output is `width/height` in mm with a matching `viewBox`, one Inkscape layer per pen (`inkscape:label="1 pen #000000"`), and one stroked `<path>` per pen whose subpaths are the dots in tour order. G-code output starts with `;` comments listing every setting, then `G21`, `G90`, pen up, and per dot: `G0` travel, pen down, a `G2` full circle or `G1` dash for circle/stroke dots, pen up. Each pen returns to `X0 Y0`, and the file ends with `M2`.
+
 ## JSON reports
 
 **apply / generate**
@@ -316,6 +358,16 @@ dith preset delete <name> [--scope project|user | --dir DIR] --json
 
 - `status` (`ok` or `partial_failure`), `dry_run`, `out_dir`, `total`, `succeeded`, `failed`
 - `items[]`, each `{input, output, status, output_dimensions, bytes_written, elapsed_ms, error?}`
+
+**plot**
+
+- `status`, `dry_run`, `source` (path or `generate:<pattern>`), `output`, `format` (`svg` or `gcode`)
+- `paper` `{name, width_mm, height_mm}`, `layout` `{width_mm, height_mm, orientation, drawable_mm, plot_area_mm}` (rects are `[x, y, w, h]` mm), `margin_mm`, `fit`, `origin`, `dot`, `pen_width_mm`, `paper_color`
+- `raster_dimensions`, `points_requested`, `points`, `iterations` (max over pens), `converged`
+- `travel_unordered_mm`, `travel_nearest_mm`, `travel_mm` (after 2-opt), `travel_reduction_pct` (vs nearest-neighbour), `draw_mm`, `pen_lifts`; travel is closed (home, every dot, home) and measured between dot centres
+- `draw_feed_mm_min`, `travel_feed_mm_min`, `estimated_plot_seconds` (travel and draw at the configured feeds plus dwell; pen-lift motion itself is not timed), `tour_capped`
+- `pens[]`, each `{index, color, points, iterations, converged, mean_movement_px, dropped, travel_unordered_mm, travel_nearest_mm, travel_mm, draw_mm, two_opt_moves, estimated_seconds}`
+- `bytes_written`, `timings_ms` `{prepare, stipple, tour, encode}` (null on `--dry-run`), `elapsed_ms`
 
 **update**
 

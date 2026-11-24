@@ -124,7 +124,7 @@ Stochastic algorithms are noise-based and grid-free. They respond to `--seed`. `
 
 ## Generators
 
-Generators are procedural sources for `generate`, `animate`, `compare --pattern`, and `preview --pattern`. Shape them with:
+Generators are procedural sources for `generate`, `animate`, `plot`, `compare --pattern`, and `preview --pattern`. Shape them with:
 - `--canvas-width` and `--canvas-height` (defaults: 640×480 for `generate`, 480×360 for `animate`)
 - `--angle` in degrees (default 135)
 - `--frequency` (default 1.0)
@@ -145,3 +145,18 @@ Generators are procedural sources for `generate`, `animate`, `compare --pattern`
 `--motion-amplitude` scales the motion (0 = still, 2 = dramatic). For rings, plasma, and checkerboard it sets the whole number of cycles per loop. `--cycles` repeats the whole motion several times per loop. `dith list generators --json` has the exact `motion` text.
 
 `--stops` sets the colors of the source image. The dither palette (`--palette`, `--colors`, or the preset's palette) decides the final ink colors. To get the stops' hues in the output, pass the same hexes to `--colors`, or use `--auto-palette`.
+
+## Paper sizes
+
+Named sizes for `dith plot --paper` (portrait mm; `--orientation` turns them). Any other size works as `WxH[mm|cm|in]`, for example `300x200mm` or `11x17in`. `dith list papers --json` has the same list.
+
+| id | Size (mm) |
+| --- | --- |
+| `a2` | 420 × 594 |
+| `a3` | 297 × 420 |
+| `a4` | 210 × 297 |
+| `a5` | 148 × 210 |
+| `a6` | 105 × 148 |
+| `letter` | 215.9 × 279.4 |
+| `legal` | 215.9 × 355.6 |
+| `tabloid` | 279.4 × 431.8 |

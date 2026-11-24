@@ -17,6 +17,7 @@ An agent-friendly Rust CLI toolkit for crafting beautiful dithers, halftones, Ri
 - **15 built-in presets + persistent local presets**: Built-ins (`mac-classic`, `editorial-print`, `film-stipple`, `risograph`, `risograph-red`, `risograph-duo`, `gameboy`, `crt-amber`, `phosphor`, `blueprint`, `halftone-zine`, `woodcut`, `lo-fi-photo`, `vapor-mesh`, `pico8`) plus saved local presets in `.dith/presets/` (`--scope project`) or `~/.config/dith/presets/` (`--scope user`) via `dith preset save|list|show|delete` or `--save-preset <NAME>`. Any individual flag cleanly overrides a preset.
 - **9 procedural generators + seamless animated dithers** (`dith animate`): Create static or seamlessly looping animations (`linear-gradient`, `radial-gradient`, `mesh`, `sphere`, `waves`, `noise`, `rings`, `plasma`, `checkerboard`), re-dither existing GIFs or image sequences with a **shared global palette**, or turn any static photo into an animated Risograph line-boil GIF (`--temporal locked|boil|grain`). Export to exact-palette **GIF** or **APNG**, CSS **spritesheet**, numbered PNG frames, or play live in fullscreen terminal (`--view`)!
 - **Multiple export & terminal preview formats**: `png` (add `--optimize` for the smallest lossless PNG/APNG via palette and filter search plus Zopfli), `webp`, `jpeg`, `gif`, palettized `bmp`, Deflate-compressed `tiff`, run-length-merged or dotted **vector `svg`**, pixel-exact **Kitty graphics protocol** (`dith preview` and `--view` open **fullscreen by default** on TTYs with `[r]` raw/dither toggle, `[f]` fit/1:1 toggle, `[q/Esc]` quit; pass `--inline` for scrollback), plus Unicode **`braille`** and **`ascii`**.
+- **Pen-plotter stippling** (`dith plot`): weighted Voronoi stippling (Secord 2002) of any photo or generator, a nearest-neighbour + 2-opt tour that cuts pen-up travel, and plotter-ready output: physical-size **mm SVG** (one Inkscape layer per pen) or **G-code** with your own pen-up/pen-down commands, feeds, and origin. Paper sizes `a2`–`a6`, `letter`, `legal`, `tabloid`, or `WxHmm`; multi-colour palettes split into one pen layer per colour. 20k points on a 1200px raster take about half a second.
 - **Built for AI agents**:
   - `dith capabilities` — one-shot self-describing JSON manifest of every command, algorithm, preset, palette, generator, flag, and range.
   - `--json` global flag — deterministic structured JSON results (dimensions, palette usage histogram, elapsed ms, optional inline Braille preview) and structured JSON errors with `code`, `suggestion`, and `valid_values`.
@@ -98,4 +99,10 @@ dith animate rings -o rings-sheet.png --anim-format spritesheet --sheet-cols 6 -
 
 # 9. Parallel batch processing
 dith batch assets/*.png --out-dir ./dithered --preset brand-hero --json
+
+# 10. Pen-plotter stipples (mm SVG or G-code, optimised pen-up tour, JSON report with travel + plot time)
+dith plot portrait.jpg -o portrait.svg -n 20000 --paper a4 --edges 0.8 --json
+dith plot portrait.jpg -o portrait.gcode -n 20000 --pen-down "M3 S30" --pen-up M5 --dwell 0.15 --draw-feed 3000 --travel-feed 8000
+dith plot sphere -o orb.svg --paper a3 --dot circle --min-dot 0.4 --max-dot 1.6 --pen-width 0.3
+dith plot mesh -o duo.svg --colors "#111111,#e11d48,#ffffff" --stops "#111111,#e11d48,#ffffff"   # one layer per pen
 ```
