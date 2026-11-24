@@ -1,12 +1,12 @@
 //! Serializable dithering recipes, pipeline execution, and self-describing capabilities schema.
 
 use std::path::PathBuf;
-use std::time::Instant;
 
 use anyhow::Result;
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use web_time::Instant;
 
 use crate::color::{ColorSpace, Rgb};
 use crate::dither::{Algorithm, AlgorithmInfo, DitherOptions, dither_image};
@@ -401,6 +401,7 @@ pub fn build_capabilities() -> CapabilitiesManifest {
             "Use `--emit-recipe` and `--recipe <file|->` to save, mutate, and replay exact JSON dithering pipelines.",
             "Save reusable project-local (`.dith/presets/`) or user-global presets with `dith preset save <name> ...` or `--save-preset <name>` on apply/generate.",
             "Use `--dry-run --json` to validate arguments and preview planned dimensions without writing files.",
+            "Recipes also render byte-identically in browsers and Node through the `dith` npm package (WebAssembly) and the web playground, which copies the exact CLI command back.",
             "Use `--format svg --svg-shape circle --svg-skip-bg` for crisp transparent-ready web SVGs, or `dith preview` / `--view` for fullscreen Kitty graphics previews (pass `--inline` to print in scrollback instead).",
         ],
         commands: vec![

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="description" content="Dither images in your browser with the dith engine compiled to WebAssembly. Nothing is uploaded." />
+    <title>dith playground</title>
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <h1>Dither any image in your browser</h1>
+        <p class="lede">The dith engine in WebAssembly. Nothing is uploaded.</p>
+      </div>
+      <nav class="top-links">
+        <button type="button" class="link" id="theme">Theme</button>
+        <a class="link" href="https://github.com/lassejlv/dith">GitHub</a>
+      </nav>
+    </header>
+
+    <main class="app">
+      <section class="stage" id="stage" aria-label="Result">
+        <canvas id="result" class="view" aria-label="Dithered result"></canvas>
+        <canvas id="original" class="view" hidden aria-label="Original image"></canvas>
+        <div class="drop" id="drop" hidden>Drop to dither</div>
+        <div class="stage-bar">
+          <div class="segmented" role="group" aria-label="View">
+            <button type="button" id="show-original" aria-pressed="false">Original</button>
+            <button type="button" id="show-result" aria-pressed="true">Dithered</button>
+          </div>
+          <span class="meta" id="meta">Loading</span>
+        </div>
+      </section>
+
+      <aside class="panel" aria-label="Settings" data-pending>
+        <div class="panel-scroll">
+          <div class="group">
+            <div class="row">
+              <button type="button" class="button" id="open">Open image</button>
+              <label class="select-wrap grow">
+                <span class="sr">Generator</span>
+                <select id="generator"></select>
+              </label>
+            </div>
+            <input type="file" id="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden />
+          </div>
+
+          <div class="group" id="selects"></div>
+          <div class="group" id="palette-extra"></div>
+          <div class="group" id="generator-controls"></div>
+          <div class="group" id="sliders"></div>
+          <div class="group toggles" id="toggles"></div>
+        </div>
+
+        <div class="group panel-foot">
+          <div class="row">
+            <button type="button" class="button primary grow" data-download="png">Download PNG</button>
+            <button type="button" class="button" data-download="webp">WebP</button>
+            <button type="button" class="button" data-download="svg">SVG</button>
+          </div>
+          <div class="command">
+            <p id="command" class="command-text"></p>
+            <div class="row">
+              <button type="button" class="button grow" id="copy">Copy command</button>
+              <button type="button" class="button" id="recipe">Recipe</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

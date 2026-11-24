@@ -4,11 +4,11 @@ use std::sync::{LazyLock, OnceLock};
 
 use clap::ValueEnum;
 use image::{Rgba, RgbaImage};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::{ColorSpace, LinearRgb, Rgb, srgb_u8_to_linear};
 use crate::palette::{Palette, SplitMix64};
+use crate::par::prelude::*;
 
 /// All supported dithering algorithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
@@ -1441,7 +1441,7 @@ fn generate_void_and_cluster(size: usize) -> Vec<f32> {
     let mut energy = vec![0.0f32; n];
     let mut placed = 0usize;
     while placed < init_ones {
-        let idx = (rng.next_u64() as usize) % n;
+        let idx = (rng.next_u64() % n as u64) as usize;
         if !pattern[idx] {
             pattern[idx] = true;
             add_energy(&mut energy, idx % size, idx / size, 1.0);

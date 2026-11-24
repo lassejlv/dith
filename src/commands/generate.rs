@@ -7,8 +7,9 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::cli::DitherFlags;
-use crate::color::Rgb;
-use crate::generate::{GenerateOptions, Pattern, generate_pattern};
+use crate::generate::{
+    DEFAULT_SOURCE_STOPS, GenerateOptions, Pattern, generate_pattern, take_canvas_size,
+};
 use crate::output::{OutputFormat, encode_image, render_braille};
 use crate::palette::Palette;
 use crate::preprocess::plan_dimensions;
@@ -106,19 +107,14 @@ pub(crate) fn handle_generate(args: &GenerateArgs, as_json: bool) -> Result<()> 
     let stops = if let Some(spec) = &args.stops {
         Palette::from_hex_list(spec)?.colors().to_vec()
     } else {
-        // Default smooth dark -> light stops so every palette spans its full tonal range cleanly.
-        vec![Rgb::from_u32(0x0A0A0D), Rgb::from_u32(0xF7F7F9)]
+        DEFAULT_SOURCE_STOPS.to_vec()
     };
 
-    let gen_w = recipe.preprocess.width.unwrap_or(args.canvas_width).max(1);
-    let gen_h = recipe
-        .preprocess
-        .height
-        .unwrap_or(args.canvas_height)
-        .max(1);
-    // Avoid double-resizing when canvas already matches requested width/height.
-    recipe.preprocess.width = None;
-    recipe.preprocess.height = None;
+    let (gen_w, gen_h) = take_canvas_size(
+        &mut recipe.preprocess,
+        args.canvas_width,
+        args.canvas_height,
+    );
 
     let gen_opts = GenerateOptions {
         pattern: args.pattern,

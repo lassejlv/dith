@@ -538,7 +538,7 @@ fn symbol_costs(histogram: &[u32]) -> Vec<f32> {
     let total = histogram.iter().map(|&c| c as f32).sum::<f32>().max(1.0);
     histogram
         .iter()
-        .map(|&c| (total / (c as f32).max(0.4)).log2().max(0.0))
+        .map(|&c| (f64::from(total / (c as f32).max(0.4)).log2() as f32).max(0.0))
         .collect()
 }
 

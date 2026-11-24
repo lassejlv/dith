@@ -122,6 +122,10 @@ With `--json`, errors go to stderr as `{"status":"error","code","message","sugge
 
 `--view`, `preview` (fullscreen by default), and `compare --view` are interactive Kitty-protocol viewers meant for a human at a terminal. In non-interactive agent shells, render to files, use `--preview` or `--format braille`, or pass `--inline` (for example `dith preview img.png --inline --mode braille --cols 60`). Only use the fullscreen viewer when the user explicitly wants to watch in their own terminal.
 
+## Browser and Node
+
+The engine also ships as the `dith` npm package (WebAssembly with a worker pool and generated types, browsers and Node 20+) and a browser playground in the repository's `web/` folder. Both take the same recipe JSON as `--recipe` and produce byte-identical output, and the playground's "Copy command" gives the exact `dith apply`/`dith generate` command. See [references/cli.md](references/cli.md#browser-and-node-webassembly).
+
 ## References
 
 - [references/cli.md](references/cli.md): every subcommand and flag, with ranges, defaults, and JSON report fields.

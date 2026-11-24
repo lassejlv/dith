@@ -1,2 +1,10 @@
 /target
 .DS_Store
+node_modules/
+/npm/dist
+/npm/wasm
+/npm/src/generated
+/npm/bench/dist
+.vitest/
+/web/dist
+/web/e2e-out

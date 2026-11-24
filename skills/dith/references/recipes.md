@@ -238,6 +238,7 @@ dith apply other.jpg -o other.png --recipe look.recipe.json --json
 - Replaying a recipe on the same input gives byte-identical output.
 - Any explicit flag overrides the matching recipe field. Precedence is `--recipe`, then `--preset`, then explicit flags.
 - `--recipe -` reads the recipe from stdin.
+- The same recipe renders byte-identically in the browser playground and the `dith` npm package; the playground's "Recipe" download replays here with `--recipe recipe.json`.
 
 ### Pipe through stdin and stdout
 

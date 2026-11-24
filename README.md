@@ -43,6 +43,22 @@ mbx run -- --help
 
 An agent skill for using `dith` lives in [`skills/dith/SKILL.md`](skills/dith/SKILL.md).
 
+## Browser playground & npm package
+
+The same engine compiles to WebAssembly, so dithering also runs in the browser and in Node 20+ with byte-identical output.
+
+- **Playground** ([`web/`](web/)): drop an image or pick a generator, tune presets, palettes and sliders with live previews, download PNG/WebP/SVG, and copy the `dith apply` / `dith generate` command (or the recipe JSON) that reproduces the result exactly. It deploys to GitHub Pages from `main`.
+- **npm package** [`dith`](npm/): a typed browser library with a worker pool, live-preview helpers, and types generated from the engine (built with Vite+).
+
+```js
+import { render } from "dith";
+
+const out = await render(file, { preset: "risograph", maxDim: 1200, format: "webp" });
+// out.bytes, out.mime, out.width, out.height, out.report (same fields as `dith apply --json`)
+```
+
+Build the WebAssembly module with `scripts/build-wasm.sh` (needs the `wasm32-unknown-unknown` target, `wasm-bindgen`, and optionally `wasm-opt`; `scripts/install-wasm-tools.sh` installs both on Linux x86_64), then run `cd npm && npm ci && npm run build` (types and `vp pack`) and `cd web && npm ci && npx vp dev` for the playground. The library alone builds with `cargo build --lib --target wasm32-unknown-unknown --no-default-features --features wasm`.
+
 ## Agent Quickstart
 
 ```bash
