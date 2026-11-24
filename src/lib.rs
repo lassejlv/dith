@@ -3,12 +3,14 @@
 pub mod animate;
 pub mod cli;
 pub mod color;
+mod commands;
 pub mod compare;
 pub mod dither;
 pub mod generate;
 pub mod inspect;
 pub mod output;
 pub mod palette;
+mod png_optimize;
 pub mod preprocess;
 pub mod preset;
 pub mod recipe;

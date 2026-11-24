@@ -56,8 +56,8 @@ struct GithubAsset {
 /// Return the official prebuilt target triple supported for the current OS & CPU architecture.
 ///
 /// # Errors
-/// Returns an error on platforms without prebuilt release artifacts (only macOS ARM and Linux
-/// Intel `x86_64` are shipped as prebuilt binaries).
+/// Returns an error on platforms without prebuilt release artifacts (only macOS ARM, Linux
+/// Intel `x86_64`, and Linux ARM `aarch64` are shipped as prebuilt binaries).
 pub const fn detect_target() -> Result<&'static str, &'static str> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
@@ -67,13 +67,18 @@ pub const fn detect_target() -> Result<&'static str, &'static str> {
     {
         Ok("x86_64-unknown-linux-gnu")
     }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        Ok("aarch64-unknown-linux-gnu")
+    }
     #[cfg(not(any(
         all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "linux", target_arch = "x86_64")
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64")
     )))]
     {
         Err(
-            "prebuilt binaries are only published for macOS ARM (aarch64-apple-darwin) and Linux Intel (x86_64-unknown-linux-gnu); update from source via `cargo install --git https://github.com/lassejlv/dith --force`",
+            "prebuilt binaries are only published for macOS ARM (aarch64-apple-darwin), Linux Intel (x86_64-unknown-linux-gnu), and Linux ARM (aarch64-unknown-linux-gnu); update from source via `cargo install --git https://github.com/lassejlv/dith --force`",
         )
     }
 }

@@ -885,3 +885,60 @@ fn procedural_sources_skip_preset_photo_prep_unless_flags_are_explicit() {
     assert_eq!(applied["auto_levels"], true);
     assert!(applied["sharpen"].as_f64().unwrap() > 0.0);
 }
+
+#[test]
+fn optimize_flag_shrinks_png_losslessly_and_round_trips_through_recipes() {
+    let dir = TempDir::new().unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    let generate = |extra: &[&str], out: &str| {
+        let result = dith_bin()
+            .args([
+                "generate",
+                "sphere",
+                "--canvas-width",
+                "96",
+                "--canvas-height",
+                "64",
+            ])
+            .args(["--json", "-o", out])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "generate failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()
+    };
+
+    generate(&["--preset", "risograph"], &path("default.png"));
+    let report = generate(
+        &["--preset", "risograph", "--optimize", "--emit-recipe"],
+        &path("optimized.png"),
+    );
+    assert_eq!(report["recipe"]["export"]["optimize"], true);
+
+    let default_bytes = std::fs::read(path("default.png")).unwrap();
+    let optimized_bytes = std::fs::read(path("optimized.png")).unwrap();
+    assert!(optimized_bytes.len() < default_bytes.len());
+    assert_eq!(
+        image::load_from_memory(&optimized_bytes)
+            .unwrap()
+            .to_rgba8(),
+        image::load_from_memory(&default_bytes).unwrap().to_rgba8()
+    );
+
+    let mut recipe = report["recipe"].clone();
+    std::fs::write(path("optimize.json"), recipe.to_string()).unwrap();
+    generate(&["--recipe", &path("optimize.json")], &path("replayed.png"));
+    assert_eq!(
+        std::fs::read(path("replayed.png")).unwrap(),
+        optimized_bytes
+    );
+
+    recipe["export"].as_object_mut().unwrap().remove("optimize");
+    std::fs::write(path("legacy.json"), recipe.to_string()).unwrap();
+    generate(&["--recipe", &path("legacy.json")], &path("legacy.png"));
+    assert_eq!(std::fs::read(path("legacy.png")).unwrap(), default_bytes);
+}

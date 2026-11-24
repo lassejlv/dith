@@ -16,7 +16,7 @@ An agent-friendly Rust CLI toolkit for crafting beautiful dithers, halftones, Ri
 - **29+ curated palettes + custom & adaptive**: Built-ins (`bw`, `mac-1bit`, `newsprint`, `ink-cream`, `risograph-blue`, `risograph-red`, `risograph-duo`, `blueprint`, `sepia`, `amber-crt`, `phosphor-green`, `gameboy`, `cobalt-sand`, `vermilion-paper`, `sunset-dusk`, `cyber-magenta`, `pico8`, `nord`, `gruvbox`, `catppuccin`, `cmyk`, `grayN`, `rgb332`, `web216`), inline `--colors "#111,#f5efe6"`, palette files (`.hex`, `.gpl`, `.json`), and `--auto-palette N` (Oklab k-means++ extraction).
 - **15 built-in presets + persistent local presets**: Built-ins (`mac-classic`, `editorial-print`, `film-stipple`, `risograph`, `risograph-red`, `risograph-duo`, `gameboy`, `crt-amber`, `phosphor`, `blueprint`, `halftone-zine`, `woodcut`, `lo-fi-photo`, `vapor-mesh`, `pico8`) plus saved local presets in `.dith/presets/` (`--scope project`) or `~/.config/dith/presets/` (`--scope user`) via `dith preset save|list|show|delete` or `--save-preset <NAME>`. Any individual flag cleanly overrides a preset.
 - **9 procedural generators + seamless animated dithers** (`dith animate`): Create static or seamlessly looping animations (`linear-gradient`, `radial-gradient`, `mesh`, `sphere`, `waves`, `noise`, `rings`, `plasma`, `checkerboard`), re-dither existing GIFs or image sequences with a **shared global palette**, or turn any static photo into an animated Risograph line-boil GIF (`--temporal locked|boil|grain`). Export to exact-palette **GIF** or **APNG**, CSS **spritesheet**, numbered PNG frames, or play live in fullscreen terminal (`--view`)!
-- **Multiple export & terminal preview formats**: `png`, `webp`, `jpeg`, `gif`, `bmp`, `tiff`, run-length-merged or dotted **vector `svg`**, pixel-exact **Kitty graphics protocol** (`dith preview` and `--view` open **fullscreen by default** on TTYs with `[r]` raw/dither toggle, `[f]` fit/1:1 toggle, `[q/Esc]` quit; pass `--inline` for scrollback), plus Unicode **`braille`** and **`ascii`**.
+- **Multiple export & terminal preview formats**: `png` (add `--optimize` for the smallest lossless PNG/APNG via palette and filter search plus Zopfli), `webp`, `jpeg`, `gif`, palettized `bmp`, Deflate-compressed `tiff`, run-length-merged or dotted **vector `svg`**, pixel-exact **Kitty graphics protocol** (`dith preview` and `--view` open **fullscreen by default** on TTYs with `[r]` raw/dither toggle, `[f]` fit/1:1 toggle, `[q/Esc]` quit; pass `--inline` for scrollback), plus Unicode **`braille`** and **`ascii`**.
 - **Built for AI agents**:
   - `dith capabilities` — one-shot self-describing JSON manifest of every command, algorithm, preset, palette, generator, flag, and range.
   - `--json` global flag — deterministic structured JSON results (dimensions, palette usage histogram, elapsed ms, optional inline Braille preview) and structured JSON errors with `code`, `suggestion`, and `valid_values`.
@@ -24,10 +24,10 @@ An agent-friendly Rust CLI toolkit for crafting beautiful dithers, halftones, Ri
 
 ## Install & Update
 
-Prebuilt binaries are published for **macOS Apple Silicon (`aarch64-apple-darwin`)** and **Linux Intel (`x86_64-unknown-linux-gnu`)**.
+Prebuilt binaries are published for **macOS Apple Silicon (`aarch64-apple-darwin`)**, **Linux Intel (`x86_64-unknown-linux-gnu`)**, and **Linux ARM (`aarch64-unknown-linux-gnu`)**.
 
 ```bash
-# Install binary + agent skill (macOS ARM / Linux x86_64)
+# Install binary + agent skill (macOS ARM / Linux x86_64 / Linux aarch64)
 curl -fsSL https://raw.githubusercontent.com/lassejlv/dith/main/install.sh | bash
 
 # Update to the latest release anytime

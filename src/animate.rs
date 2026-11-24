@@ -23,7 +23,10 @@ use thiserror::Error;
 use crate::color::Rgb;
 use crate::dither::dither_image;
 use crate::generate::{GenerateOptions, generate_pattern};
-use crate::output::{ColorUsage, PngLayout, color_histogram, encode_png_bytes, write_output_file};
+use crate::output::{
+    ColorUsage, PngLayout, color_histogram, encode_optimized_png_bytes, encode_png_bytes,
+    write_output_file,
+};
 use crate::palette::{Palette, extract_adaptive_palette, extract_adaptive_palette_from_frames};
 use crate::preprocess::{finalize_image, prepare_image};
 use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError};
@@ -961,10 +964,11 @@ fn delta_frame(prev: &[u8], cur: &[u8], w: u16, unchanged_idx: Option<u8>) -> gi
 ///
 /// All frames share one compact [`PngLayout`] (an indexed palette for dithered output), and every
 /// frame after the first only stores the bounding box of pixels that changed since the previous one.
+/// With `optimize`, every frame is re-filtered and compressed with Zopfli for the smallest file.
 ///
 /// # Errors
 /// Returns an error if frames are empty or PNG encoding fails.
-pub fn encode_apng(frames: &[AnimFrame], loops: u32) -> Result<Vec<u8>> {
+pub fn encode_apng(frames: &[AnimFrame], loops: u32, optimize: bool) -> Result<Vec<u8>> {
     let first = frames
         .first()
         .context("cannot encode APNG from empty frame list")?;
@@ -987,7 +991,14 @@ pub fn encode_apng(frames: &[AnimFrame], loops: u32) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, w, h);
-        layout.configure(&mut encoder, png::Compression::High);
+        layout.configure(
+            &mut encoder,
+            if optimize {
+                png::Compression::NoCompression
+            } else {
+                png::Compression::High
+            },
+        );
         encoder
             .set_animated(num_frames, loops)
             .context("configuring APNG animation header")?;
@@ -1020,7 +1031,11 @@ pub fn encode_apng(frames: &[AnimFrame], loops: u32) -> Result<Vec<u8>> {
         }
         writer.finish().context("finalizing APNG stream")?;
     }
-    Ok(out)
+    if optimize {
+        crate::png_optimize::recompress(&out)
+    } else {
+        Ok(out)
+    }
 }
 
 /// Bounding box `(x, y, width, height)` of pixels that differ between two equally sized frames
@@ -1070,10 +1085,15 @@ pub fn compose_spritesheet(frames: &[AnimFrame], columns: Option<u32>) -> (RgbaI
 }
 
 /// Write numbered PNG frames (`frame_0001.png`, ...) into `dir` and return their written paths.
+/// With `optimize`, each frame is encoded with [`encode_optimized_png_bytes`].
 ///
 /// # Errors
 /// Returns an error if directory creation, PNG encoding, or file writing fails.
-pub fn write_frames_directory(frames: &[AnimFrame], dir: &Path) -> Result<Vec<PathBuf>> {
+pub fn write_frames_directory(
+    frames: &[AnimFrame],
+    dir: &Path,
+    optimize: bool,
+) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(dir)
         .with_context(|| format!("creating frames directory '{}'", dir.display()))?;
 
@@ -1082,7 +1102,11 @@ pub fn write_frames_directory(frames: &[AnimFrame], dir: &Path) -> Result<Vec<Pa
         .enumerate()
         .map(|(i, frame)| {
             let path = dir.join(format!("frame_{:04}.png", i + 1));
-            let bytes = encode_png_bytes(&frame.image)?;
+            let bytes = if optimize {
+                encode_optimized_png_bytes(&frame.image)?
+            } else {
+                encode_png_bytes(&frame.image)?
+            };
             Ok((path, bytes))
         })
         .collect();
@@ -1174,7 +1198,7 @@ mod tests {
         let gif_bytes = encode_gif(&anim.frames, &anim.palette, 0, false).unwrap();
         assert!(gif_bytes.starts_with(b"GIF89a"));
 
-        let apng_bytes = encode_apng(&anim.frames, 0).unwrap();
+        let apng_bytes = encode_apng(&anim.frames, 0, false).unwrap();
         assert!(apng_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(
             apng_bytes.windows(4).any(|w| w == b"acTL"),
@@ -1267,17 +1291,22 @@ mod tests {
     }
 
     fn assert_apng_roundtrips_exactly(frames: &[AnimFrame]) {
-        let bytes = encode_apng(frames, 0).unwrap();
-        let decoded: Vec<RgbaImage> = PngDecoder::new(std::io::Cursor::new(bytes))
-            .unwrap()
-            .apng()
-            .unwrap()
-            .into_frames()
-            .map(|f| f.unwrap().into_buffer())
-            .collect();
-        assert_eq!(decoded.len(), frames.len());
-        for (i, (dec, frame)) in decoded.iter().zip(frames).enumerate() {
-            assert_eq!(dec, &frame.image, "APNG frame {i} differs after decode");
+        for optimize in [false, true] {
+            let bytes = encode_apng(frames, 0, optimize).unwrap();
+            let decoded: Vec<RgbaImage> = PngDecoder::new(std::io::Cursor::new(bytes))
+                .unwrap()
+                .apng()
+                .unwrap()
+                .into_frames()
+                .map(|f| f.unwrap().into_buffer())
+                .collect();
+            assert_eq!(decoded.len(), frames.len());
+            for (i, (dec, frame)) in decoded.iter().zip(frames).enumerate() {
+                assert_eq!(
+                    dec, &frame.image,
+                    "APNG frame {i} differs after decode (optimize: {optimize})"
+                );
+            }
         }
     }
 
@@ -1287,7 +1316,7 @@ mod tests {
             image: RgbaImage::new(w, h),
             delay_ms: 80,
         });
-        let err = encode_apng(&frames, 0).unwrap_err().to_string();
+        let err = encode_apng(&frames, 0, false).unwrap_err().to_string();
         assert!(err.contains("frame 2 is 32x16"), "{err}");
     }
 
