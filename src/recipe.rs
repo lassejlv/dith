@@ -17,6 +17,7 @@ use crate::palette::{
     BuiltinPaletteInfo, Palette, PaletteError, builtin_palette_ids, extract_adaptive_palette,
     list_builtin_palettes,
 };
+use crate::plot::{PAPER_SIZES, PlotFormat};
 use crate::preprocess::{PreprocessOptions, finalize_image, prepare_image};
 use crate::preset::{
     PresetStoreError, PresetSummary, UnknownPresetError, all_preset_ids, list_all_presets,
@@ -361,8 +362,33 @@ pub struct CapabilitiesManifest {
     pub color_spaces: Vec<NamedDescription>,
     pub output_formats: Vec<NamedDescription>,
     pub animation_formats: Vec<NamedDescription>,
+    /// Pen-plotter file formats written by `dith plot`.
+    pub plot_formats: Vec<NamedDescription>,
+    /// Named paper sizes accepted by `dith plot --paper`.
+    pub paper_sizes: Vec<PaperInfo>,
     pub parameter_ranges: Vec<ParameterRange>,
     pub default_recipe: DitherRecipe,
+}
+
+/// A named paper size for `dith plot --paper`, in portrait millimetres.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperInfo {
+    pub id: &'static str,
+    pub width_mm: f64,
+    pub height_mm: f64,
+}
+
+/// Every named paper size accepted by `dith plot --paper`.
+#[must_use]
+pub fn paper_sizes() -> Vec<PaperInfo> {
+    PAPER_SIZES
+        .iter()
+        .map(|&(id, width_mm, height_mm)| PaperInfo {
+            id,
+            width_mm,
+            height_mm,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -404,6 +430,7 @@ pub fn build_capabilities() -> CapabilitiesManifest {
             "Save reusable project-local (`.dith/presets/`) or user-global presets with `dith preset save <name> ...` or `--save-preset <name>` on apply/generate.",
             "Use `--dry-run --json` to validate arguments and preview planned dimensions without writing files.",
             "Use `--format svg --svg-shape circle --svg-skip-bg` for crisp transparent-ready web SVGs, or `dith preview` / `--view` for fullscreen Kitty graphics previews (pass `--inline` to print in scrollback instead).",
+            "Use `dith plot photo.jpg -o plot.svg -n 20000 --edges 0.8 --json` for pen-plotter stipples (mm SVG or .gcode) with an optimised pen-up tour.",
         ],
         commands: vec![
             CommandCapability {
@@ -442,13 +469,18 @@ pub fn build_capabilities() -> CapabilitiesManifest {
                 example: "dith batch img1.png img2.png --out-dir ./dithered --preset mac-classic --json",
             },
             CommandCapability {
+                name: "plot",
+                summary: "Stipple an image or generator for pen plotters (weighted Voronoi stippling, nearest-neighbour + 2-opt tour) as physical-size mm SVG or G-code, one layer per pen.",
+                example: "dith plot photo.jpg -o portrait.gcode -n 20000 --paper a4 --edges 0.8 --pen-down \"M3 S30\" --pen-up M5 --json",
+            },
+            CommandCapability {
                 name: "inspect",
                 summary: "Analyze dimensions, luminance percentiles, transparency, dominant hex colors, and recommended dithering commands.",
                 example: "dith inspect photo.png --json",
             },
             CommandCapability {
                 name: "list",
-                summary: "List available algorithms, palettes, presets (including saved local presets), generators, or formats.",
+                summary: "List available algorithms, palettes, presets (including saved local presets), generators, formats, or plotter paper sizes.",
                 example: "dith list palettes --tag risograph --json",
             },
             CommandCapability {
@@ -529,6 +561,14 @@ pub fn build_capabilities() -> CapabilitiesManifest {
                 description: format.description(),
             })
             .collect(),
+        plot_formats: PlotFormat::ALL
+            .iter()
+            .map(|f| NamedDescription {
+                id: f.id(),
+                description: f.description(),
+            })
+            .collect(),
+        paper_sizes: paper_sizes(),
         parameter_ranges: vec![
             ParameterRange {
                 flag: "--strength",
@@ -669,6 +709,76 @@ pub fn build_capabilities() -> CapabilitiesManifest {
                 range: "true | false",
                 default: "false",
                 effect: "Smallest lossless PNG/APNG/spritesheet via palette-order and filter search plus Zopfli (encodes several times slower)",
+            },
+            ParameterRange {
+                flag: "plot --points / --density",
+                value_type: "usize / f64",
+                range: "1..=1000000 / 0.001..=10000 dots per cm² of solid ink",
+                default: "5000",
+                effect: "Stipple budget across all pens (density scales with paper size and image darkness)",
+            },
+            ParameterRange {
+                flag: "plot --iterations / --tolerance",
+                value_type: "u32 / f64",
+                range: "0..=1000 / 0.0..=100.0 raster px",
+                default: "50 / 0.02",
+                effect: "Lloyd relaxation budget; stops early once the mean point movement falls below the tolerance",
+            },
+            ParameterRange {
+                flag: "plot --resolution",
+                value_type: "u32",
+                range: "64..=8192",
+                default: "1200",
+                effect: "Longest side of the density raster that stipples are relaxed on",
+            },
+            ParameterRange {
+                flag: "plot --edges",
+                value_type: "f32",
+                range: "0.0..=4.0",
+                default: "0.0",
+                effect: "Adds Sobel edge strength to the ink density so eyes, lips, and outlines get extra dots (0.5..1.0 for portraits)",
+            },
+            ParameterRange {
+                flag: "plot --cutoff",
+                value_type: "f32",
+                range: "0.0..=0.99",
+                default: "0.0",
+                effect: "Ink densities below this are bare paper (cleans near-white backgrounds)",
+            },
+            ParameterRange {
+                flag: "plot --paper / --orientation / --margin / --fit",
+                value_type: "size / enum / mm / enum",
+                range: "a2..a6 | letter | legal | tabloid | WxH[mm|cm|in] / auto | portrait | landscape / 0..=1000 / contain | cover",
+                default: "a4 / auto / 15 / contain",
+                effect: "Physical sheet, orientation, margins, and how the source fills the drawable area",
+            },
+            ParameterRange {
+                flag: "plot --dot / --pen-width / --min-dot / --max-dot",
+                value_type: "enum / mm / mm / mm",
+                range: "point | circle | stroke / 0.05..=10 / 0..=max-dot / 0.05..=50",
+                default: "point / 0.5 / max-dot / 1.2",
+                effect: "Dot primitive and size; circle/stroke dots scale with local darkness when min-dot < max-dot",
+            },
+            ParameterRange {
+                flag: "plot --pen-up / --pen-down / --pen-change / --dwell",
+                value_type: "G-code lines ('\\n' separated) / seconds",
+                range: "any / 0.0..=10.0",
+                default: "G0 Z2 / G1 Z0 F1000 / M0 ; change pen / 0",
+                effect: "G-code pen lift, drop, between-pen pause, and settle time (G4 P<s>)",
+            },
+            ParameterRange {
+                flag: "plot --draw-feed / --travel-feed / --origin",
+                value_type: "mm/min / mm/min / enum",
+                range: "1..=1000000 / 1..=1000000 / bottom-left | top-left | center",
+                default: "3000 / 6000 / bottom-left",
+                effect: "G-code feed rates (also drive the plot-time estimate) and where X0 Y0 sits",
+            },
+            ParameterRange {
+                flag: "plot --no-optimize / --tour-time-limit",
+                value_type: "bool / seconds",
+                range: "true | false / 0.0..=3600 (0 = no cap)",
+                default: "false / 10",
+                effect: "Skip 2-opt or cap its wall time (reported as tour_capped; output is byte-deterministic unless capped)",
             },
         ],
         default_recipe: DitherRecipe::default(),

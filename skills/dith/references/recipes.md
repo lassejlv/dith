@@ -254,3 +254,58 @@ With `-o -` there is no extension to infer from, so output is PNG unless you pas
 ```sh
 dith apply photo.jpg -o art.txt --format braille --text-width 60 --preset mac-classic --json
 ```
+
+## Pen plotters
+
+### Stippled portrait for a GRBL servo pen plotter
+
+```sh
+dith plot portrait.jpg -o portrait.gcode -n 20000 --paper a4 --margin 20 \
+  --edges 0.8 --cutoff 0.04 \
+  --pen-down "M3 S30" --pen-up M5 --dwell 0.15 \
+  --draw-feed 3000 --travel-feed 8000 --json
+```
+
+- Plain defaults already give a recognisable face. `--edges 0.8` adds dots along eyes, lips, and hairlines; 25k–30k points with a 0.3–0.35 mm pen read best on A4. Avoid `--auto-levels` and strong `--contrast` on portraits: they push skin highlights to paper-white, which gets no dots.
+- The G-code header lists every setting. Check `estimated_plot_seconds` (it includes the dwells: 20k points at 0.15 s each way is about 100 minutes) and lower `-n` if it is too long.
+- For a Z-axis plotter, keep the defaults (`--pen-down "G1 Z0 F1000" --pen-up "G0 Z2"`) or set your own heights.
+
+### SVG for an AxiDraw or Inkscape workflow
+
+```sh
+dith plot portrait.jpg -o portrait.svg -n 15000 --paper letter --pen-width 0.3 \
+  --edges 0.8 --json
+```
+
+- The SVG is physical size (mm) with one Inkscape layer per pen, and the dots are already in tour order, so turn off path reordering in the plotter software.
+- Rasterise to look at it: `rsvg-convert -b white -w 1200 portrait.svg -o check.png`.
+
+### Variable-size circles from a generator
+
+```sh
+dith plot sphere -o orb.svg --paper a4 -n 9000 --invert \
+  --dot circle --min-dot 0.3 --max-dot 0.9 --pen-width 0.25 --json
+```
+
+- Dot diameters scale with local darkness between `--min-dot` and `--max-dot`. Keep `--max-dot` below the dot spacing in the darkest area or circles overlap.
+- `--invert` puts the ink on the lit side of the sphere; drop it to stipple the backdrop instead.
+
+### One pen layer per palette colour
+
+```sh
+dith plot mesh -o duo.svg -n 12000 --seed 3 \
+  --colors "#111111,#e11d48,#ffffff" --stops "#111111,#e11d48,#ffffff" --json
+```
+
+- The lightest colour is the paper; every other colour becomes a pen with its own layer (SVG) or a `--pen-change` pause (G-code, default `M0`).
+- `pens[]` in the report gives each pen's point count, travel, and plot time.
+
+### Compare pen travel before and after optimisation
+
+```sh
+dith plot portrait.jpg -o portrait.gcode -n 20000 --json \
+  | jq '{points, travel_unordered_mm, travel_nearest_mm, travel_mm, travel_reduction_pct, estimated_plot_seconds}'
+```
+
+- `travel_nearest_mm` is the greedy nearest-neighbour tour and `travel_mm` the 2-opt result (typically 13–16% shorter). `--no-optimize` skips 2-opt.
+

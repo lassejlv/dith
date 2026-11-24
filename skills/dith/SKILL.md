@@ -5,7 +5,8 @@ description: >-
   Use when an agent needs to dither photos, logos, or other assets; generate procedural dither graphics (hero backgrounds, orbs, mesh gradients, textures) with no input image;
   animate GIFs, APNGs, animated WebPs, spritesheets, film-boil loops, dissolves, or palette cycling; make 1-bit, Risograph, halftone, Game Boy, PICO-8, CRT, or other retro/print looks;
   apply exact brand palettes; build algorithm/preset/palette comparison contact sheets; save reusable local presets or replayable JSON recipes;
-  render Braille/ASCII/Kitty terminal previews; or batch-dither many files.
+  render Braille/ASCII/Kitty terminal previews; batch-dither many files; or stipple photos and generators for pen plotters
+  (weighted Voronoi stippling with an optimised pen path, exported as physical-size mm SVG or G-code).
 ---
 
 # Dith
@@ -18,7 +19,7 @@ description: >-
    - Inside the dith source checkout without a global install, run it via `cargo run --release -- <args>` (or `mbx run -- <args>` when `mbx` is available).
    - If dith is missing, tell the user and offer an install command from [references/cli.md](references/cli.md#install-update-or-run-from-source). Wait for their approval before installing anything.
 2. Do not rely on memorized catalogs when the exact set matters. Ask the binary:
-   - `dith list presets|algorithms|palettes|generators|formats|anim-formats --json`, filterable with `--tag <substr>` or `--category <name>`
+   - `dith list presets|algorithms|palettes|generators|formats|anim-formats|papers --json`, filterable with `--tag <substr>` or `--category <name>`
    - `dith capabilities` for the full manifest of commands, parameter ranges, and the default recipe (about 40 KB, so prefer `list` when one catalog is enough)
 
 ## Core workflow
@@ -27,7 +28,7 @@ description: >-
 2. **Pick a starting point** from the [style guide](#choose-a-look) below. When the direction is open, render a contact sheet and look at it before committing:
    `dith compare <image> -o sheet.png --presets mac-classic,editorial-print,risograph,film-stipple --json`
 3. **Validate complex flag sets first** with `--dry-run --json`. This catches bad values and shows planned `output_dimensions` without writing files.
-4. **Render** with `apply`, `generate`, `animate`, or `batch`, always with `--json`. Single-file commands overwrite existing outputs by default. Add `--no-clobber` when existing files must not be touched; in `batch` it applies to each file.
+4. **Render** with `apply`, `generate`, `animate`, `batch`, or `plot`, always with `--json`. Single-file commands overwrite existing outputs by default. Add `--no-clobber` when existing files must not be touched; in `batch` it applies to each file.
 5. **Verify before reporting success.** See [Verify the result](#verify-the-result).
 6. **Make it reproducible** when the look will be reused. Pass `--emit-recipe` (adds a `recipe` object to the report) or `--save-preset <name>` (writes `.dith/presets/<name>.json`).
 
@@ -100,6 +101,19 @@ Output goes to `.gif`, `.apng`, or `.webp` (all exact-palette and delta-encoded;
 - **Procedural colors.** Without `--stops`, patterns use a plain near-black → near-white ramp. Pass `--stops` to choose the source tones deliberately; it usually looks better, especially with a colored palette.
 - **Presets on procedural sources.** Presets are tuned for photos. For `generate`, `animate <pattern>`, and `compare`/`preview --pattern`, dith skips their auto-levels, contrast, and sharpen, because those clip clean gradients into flat patches. Pass those flags explicitly to apply them anyway.
 
+## Pen plotters
+
+`dith plot <image|generator> -o out.svg|out.gcode` places stipples with weighted Voronoi stippling (rejection sampling on darkness, then Lloyd relaxation toward density-weighted centroids), orders them with a nearest-neighbour tour improved by 2-opt, and writes plotter-ready files. It does not use the dither pipeline, so presets, algorithms, and `--format png` do not apply.
+
+- **Budget.** `-n/--points` (default 5000) or `--density <dots per cm² of solid ink>`. 5k is a quick sketch, 15k–30k a detailed A4 portrait, 50k+ wants `--resolution 2000` or more. Plot time grows with points; read `estimated_plot_seconds` before committing a long plot.
+- **Tone.** Density is ink darkness (`1 - Oklab L` for a black pen on white), and point density follows it, so highlights keep sparse dots and only paper-white stays empty. Plain defaults work on photos; for portraits add `--edges 0.8` to sharpen eyes, lips, and outlines, and use 25k–30k points with a 0.3–0.35 mm pen on A4. `--cutoff 0.05` clears near-white backgrounds. `--invert` stipples the light areas. Avoid `--auto-levels` and strong `--contrast` on portraits: they push skin highlights to paper-white, which gets no dots.
+- **Paper.** `--paper a4|a3|letter|...|WxHmm`, `--orientation auto|portrait|landscape`, `--margin` mm, `--fit contain|cover`. Generators always fill the area inside the margins.
+- **Dots.** `--dot point` (pen tap, the default and fastest), `circle`, or `stroke`. For circle/stroke, `--max-dot`/`--min-dot` are outer diameters in mm and scale with local darkness; dots no bigger than `--pen-width` become taps.
+- **Machine.** `--pen-up`/`--pen-down` are raw G-code (servo pens often use `M3 S30` / `M5`, Z plotters `G1 Z0 F1000` / `G0 Z2`); separate several lines with `\n`. Add `--dwell 0.1..0.2` for servos. `--origin bottom-left|top-left|center` sets where `X0 Y0` is. Feeds are mm/min.
+- **Colours.** `--palette` or `--colors` with 2+ colours: the lightest is the paper and every other colour becomes one pen layer (one Inkscape layer and `<path>` in SVG; a `--pen-change` pause, default `M0`, between pens in G-code).
+- **Determinism.** Same flags and `--seed` give byte-identical files. 2-opt has a wall-time cap (`--tour-time-limit`, default 10s); if the report says `tour_capped: true`, the order depended on timing.
+- **Check it.** The report has `points`, `iterations`, `converged`, `travel_nearest_mm`, `travel_mm` (after 2-opt), `travel_reduction_pct`, `draw_mm`, `estimated_plot_seconds`, and per-pen stats. To look at an SVG, rasterise it (for example `rsvg-convert -b white -w 1200 out.svg -o out.png`).
+
 ## Verify the result
 
 Read the JSON report rather than assuming success:
@@ -126,4 +140,4 @@ With `--json`, errors go to stderr as `{"status":"error","code","message","sugge
 
 - [references/cli.md](references/cli.md): every subcommand and flag, with ranges, defaults, and JSON report fields.
 - [references/catalog.md](references/catalog.md): presets, palettes, algorithms, and generators, and when to choose each.
-- [references/recipes.md](references/recipes.md): copy-ready recipes for common jobs (web hero, avatar, logo SVG, social card, CSS spritesheet, reveal GIF, brand preset, batch export).
+- [references/recipes.md](references/recipes.md): copy-ready recipes for common jobs (web hero, avatar, logo SVG, social card, CSS spritesheet, reveal GIF, brand preset, batch export, pen-plotter stipples).

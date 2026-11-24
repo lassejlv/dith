@@ -22,6 +22,7 @@ pub use crate::commands::compare::CompareArgs;
 pub use crate::commands::generate::GenerateArgs;
 pub use crate::commands::inspect::InspectArgs;
 pub use crate::commands::list::{ListArgs, ListKind};
+pub use crate::commands::plot::PlotArgs;
 pub use crate::commands::preset::{
     PresetArgs, PresetCommand, PresetDeleteArgs, PresetListArgs, PresetSaveArgs, PresetShowArgs,
     PresetSourceFilter,
@@ -31,8 +32,8 @@ pub use crate::commands::update::UpdateArgs;
 use crate::commands::{
     animate::handle_animate, apply::handle_apply, batch::handle_batch,
     capabilities::handle_capabilities, compare::handle_compare, generate::handle_generate,
-    inspect::handle_inspect, list::handle_list, preset::handle_preset, preview::handle_preview,
-    update::handle_update,
+    inspect::handle_inspect, list::handle_list, plot::handle_plot, preset::handle_preset,
+    preview::handle_preview, update::handle_update,
 };
 
 /// Top-level CLI entrypoint.
@@ -70,9 +71,11 @@ pub enum Command {
     Compare(CompareArgs),
     /// Dither multiple input images in parallel into an output directory.
     Batch(BatchArgs),
+    /// Stipple an image or generator for pen plotters (weighted Voronoi + optimised tour) as mm SVG or G-code.
+    Plot(Box<PlotArgs>),
     /// Analyze an image (dimensions, luminance, dominant colors) and recommend dithering commands.
     Inspect(InspectArgs),
-    /// List available algorithms, palettes, presets, generators, or formats.
+    /// List available algorithms, palettes, presets, generators, formats, or plotter paper sizes.
     List(ListArgs),
     /// Update dith to the latest GitHub Release binary (and refresh agent skills).
     Update(UpdateArgs),
@@ -465,6 +468,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Preset(args) => handle_preset(&args, cli.json),
         Command::Compare(args) => handle_compare(&args, cli.json),
         Command::Batch(args) => handle_batch(&args, cli.json),
+        Command::Plot(args) => handle_plot(&args, cli.json),
         Command::Update(args) => handle_update(&args, cli.json),
     }
 }
