@@ -3,6 +3,7 @@
 use clap::ValueEnum;
 use image::imageops::{self, FilterType};
 use image::{Rgba, RgbaImage};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::{Rgb, linear_to_srgb_u8, srgb_u8_to_linear};
@@ -188,7 +189,7 @@ pub fn prepare_image(src: &RgbaImage, opts: &PreprocessOptions) -> PreparedImage
     }
 
     if opts.blur > 0.01 {
-        img = imageops::blur(&img, opts.blur.clamp(0.1, 20.0));
+        img = gaussian_blur(&img, opts.blur.clamp(0.1, 20.0));
     }
 
     if opts.sharpen > 0.01 {
@@ -262,6 +263,73 @@ fn resize_cover(src: &RgbaImage, target_w: u32, target_h: u32) -> RgbaImage {
     let x = (scaled_w - target_w) / 2;
     let y = (scaled_h - target_h) / 2;
     imageops::crop_imm(&scaled, x, y, target_w, target_h).to_image()
+}
+
+/// Separable Gaussian blur with clamped edges, computing exactly what `image::imageops::blur` does
+/// on `x86_64` (same kernel, tap order, and rounding) but always with a separate multiply and add.
+/// The `image` crate fuses the multiply-add on aarch64 only, so its blur differed by architecture.
+fn gaussian_blur(img: &RgbaImage, sigma: f32) -> RgbaImage {
+    let kernel = gaussian_kernel(sigma);
+    let len = kernel.len();
+    let half = len / 2;
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let stride = w * 4;
+
+    let mut rows = vec![0.0f32; stride * h];
+    rows.par_chunks_exact_mut(stride)
+        .zip(img.as_raw().par_chunks_exact(stride))
+        .for_each(|(dst, src)| {
+            let padded: Vec<f32> = (0..w + 2 * half)
+                .flat_map(|x| &src[x.saturating_sub(half).min(w - 1) * 4..][..4])
+                .map(|&v| f32::from(v))
+                .collect();
+            for (out, &v) in dst.iter_mut().zip(&padded[half * 4..]) {
+                *out = v * kernel[half];
+            }
+            for (i, &k) in kernel[..half].iter().enumerate() {
+                let fw = &padded[i * 4..];
+                let bw = &padded[(len - 1 - i) * 4..];
+                for ((out, &a), &b) in dst.iter_mut().zip(fw).zip(bw) {
+                    *out += (a + b) * k;
+                }
+            }
+        });
+
+    let row = |y: usize| &rows[y.saturating_sub(half).min(h - 1) * stride..][..stride];
+    let mut out = vec![0u8; stride * h];
+    out.par_chunks_exact_mut(stride)
+        .enumerate()
+        .for_each(|(y, dst)| {
+            let mut acc: Vec<f32> = row(y + half).iter().map(|&v| v * kernel[half]).collect();
+            for (i, &k) in kernel[..half].iter().enumerate() {
+                for ((a, &f), &b) in acc.iter_mut().zip(row(y + i)).zip(row(y + len - 1 - i)) {
+                    *a += (f + b) * k;
+                }
+            }
+            for (px, &v) in dst.iter_mut().zip(&acc) {
+                *px = v.round().clamp(0.0, 255.0) as u8;
+            }
+        });
+    RgbaImage::from_raw(img.width(), img.height(), out).unwrap_or_else(|| img.clone())
+}
+
+/// Normalized Gaussian kernel, computed as the `image` crate does (including `powf(d, 2.0)`, which
+/// does not always round like `d * d`) so blurred `x86_64` output stays byte-identical.
+fn gaussian_kernel(sigma: f32) -> Vec<f32> {
+    let size = (((((sigma - 0.8) / 0.3) + 1.0) * 2.0) + 1.0).max(3.0) as usize | 1;
+    let scale = 1.0 / ((2.0 * std::f32::consts::PI).sqrt() * sigma);
+    let mean = (size / 2) as f32;
+    let mut kernel: Vec<f32> = (0..size)
+        .map(|x| (-0.5 * ((x as f32 - mean) / sigma).powf(2.0)).exp() * scale)
+        .collect();
+    let sum: f32 = kernel.iter().sum();
+    if sum != 0.0 {
+        let inv = 1.0 / sum;
+        for k in &mut kernel {
+            *k *= inv;
+        }
+    }
+    kernel
 }
 
 fn flatten_alpha(img: &mut RgbaImage, bg: Rgb) {
@@ -453,6 +521,25 @@ fn apply_tonal_adjustments(img: &mut RgbaImage, opts: &PreprocessOptions) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On `x86_64` without FMA the `image` crate's blur uses plain multiply-add, so ours must match it
+    /// bit for bit there; elsewhere `image` fuses the multiply-add and differs by design.
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "fma")))]
+    #[test]
+    fn gaussian_blur_matches_image_crate_without_fma() {
+        let mut img = RgbaImage::new(37, 23);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            let v = (x * 7 + y * 13) as u8;
+            *px = Rgba([v, v.wrapping_mul(3), 255 - v, 200 + (x % 50) as u8]);
+        }
+        for sigma in [0.1, 0.8, 1.5, 2.37, 5.0, 12.0, 20.0] {
+            assert_eq!(
+                gaussian_blur(&img, sigma),
+                imageops::blur(&img, sigma),
+                "sigma {sigma}"
+            );
+        }
+    }
 
     #[test]
     fn plan_dimensions_respects_aspect_and_max_dim() {
