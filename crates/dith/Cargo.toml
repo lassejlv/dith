@@ -1,8 +1,10 @@
 [package]
 name = "dith"
-version = "0.5.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
 description = "Agent-friendly CLI tool for crafting beautiful dithered images, vector halftone SVGs, procedural dither art, and visual comparison sheets."
 
 [[bin]]
@@ -10,48 +12,22 @@ name = "dith"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive", "env", "wrap_help"] }
-crossterm = "0.29"
-flate2 = "1"
-gif = "0.14"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
-png = "0.18"
-rayon = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tiff = { version = "0.11", default-features = false, features = ["deflate"] }
-zopfli = { version = "0.8", default-features = false, features = ["std", "zlib"] }
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+flate2.workspace = true
+gif.workspace = true
+image.workspace = true
+png.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tiff.workspace = true
+zopfli.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
-[profile.dev]
-opt-level = 2
-
-[profile.dev.package."*"]
-opt-level = 3
-
-[profile.release]
-lto = "fat"
-codegen-units = 1
-strip = true
-panic = "abort"
-
-[lints.rust]
-unsafe_code = "forbid"
-missing_debug_implementations = "warn"
-
-[lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-module_name_repetitions = "allow"
-cast_precision_loss = "allow"
-cast_possible_truncation = "allow"
-cast_sign_loss = "allow"
-cast_possible_wrap = "allow"
-too_many_lines = "allow"
-struct_excessive_bools = "allow"
-unreadable_literal = "allow"
-many_single_char_names = "allow"
+[lints]
+workspace = true
