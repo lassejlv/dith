@@ -7,11 +7,11 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::cli::DitherFlags;
-use crate::output::{OutputFormat, encode_image, render_braille};
-use crate::preprocess::plan_dimensions;
-use crate::preset::{OverwritePolicy, PresetScope, SavePresetRequest, save_local_preset};
-use crate::recipe::{RecipeError, run_pipeline};
 use crate::viewer::{FullscreenViewerInput, ViewerBackend, run_fullscreen_viewer};
+use dith_core::output::{OutputFormat, encode_image, render_braille};
+use dith_core::preprocess::plan_dimensions;
+use dith_core::preset::{OverwritePolicy, PresetScope, SavePresetRequest, save_local_preset};
+use dith_core::recipe::{RecipeError, run_pipeline};
 
 use super::shared::{
     RenderReport, emit_inline_kitty, emit_render_report, ensure_output_destination,

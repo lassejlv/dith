@@ -7,11 +7,11 @@ use anyhow::{Context, Result};
 use image::RgbaImage;
 use serde::Serialize;
 
-use crate::color::ColorSpace;
-use crate::output::{
+use dith_core::color::ColorSpace;
+use dith_core::output::{
     ColorUsage, ExportOptions, KittyOptions, OutputFormat, render_kitty, write_output_file,
 };
-use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError};
+use dith_core::recipe::{DitherRecipe, PaletteSpec, RecipeError};
 
 /// Structured result emitted for `apply` and `generate`.
 #[derive(Debug, Serialize)]

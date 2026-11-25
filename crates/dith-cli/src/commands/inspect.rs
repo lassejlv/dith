@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 
-use crate::inspect::inspect_image;
+use dith_core::inspect::inspect_image;
 
 #[derive(Debug, Args)]
 pub struct InspectArgs {

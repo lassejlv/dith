@@ -9,13 +9,13 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::cli::DitherFlags;
-use crate::compare::{CompareTile, compose_contact_sheet};
-use crate::dither::Algorithm;
-use crate::generate::{GenerateOptions, Pattern, generate_pattern};
-use crate::output::{ExportOptions, OutputFormat, encode_image, write_output_file};
-use crate::palette::Palette;
-use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError, run_pipeline};
 use crate::viewer::{FullscreenViewerInput, ViewerBackend, run_fullscreen_viewer};
+use dith_core::compare::{CompareTile, compose_contact_sheet};
+use dith_core::dither::Algorithm;
+use dith_core::generate::{GenerateOptions, Pattern, generate_pattern};
+use dith_core::output::{ExportOptions, OutputFormat, encode_image, write_output_file};
+use dith_core::palette::Palette;
+use dith_core::recipe::{DitherRecipe, PaletteSpec, RecipeError, run_pipeline};
 
 use super::shared::{emit_inline_kitty, load_input_image, palette_spec_label};
 
@@ -172,20 +172,22 @@ pub(crate) fn handle_compare(args: &CompareArgs, as_json: bool) -> Result<()> {
     };
 
     // Render all variants in parallel via rayon.
-    let rendered: Result<Vec<(String, DitherRecipe, crate::recipe::PipelineOutput)>, RecipeError> =
-        variant_specs
-            .into_par_iter()
-            .map(|(label, mut rec)| {
-                if rec.preprocess.max_dim.is_none()
-                    && rec.preprocess.width.is_none()
-                    && rec.preprocess.height.is_none()
-                {
-                    rec.preprocess.max_dim = Some(args.tile_max_dim.max(32));
-                }
-                let out = run_pipeline(&src_img, &rec)?;
-                Ok((label, rec, out))
-            })
-            .collect();
+    let rendered: Result<
+        Vec<(String, DitherRecipe, dith_core::recipe::PipelineOutput)>,
+        RecipeError,
+    > = variant_specs
+        .into_par_iter()
+        .map(|(label, mut rec)| {
+            if rec.preprocess.max_dim.is_none()
+                && rec.preprocess.width.is_none()
+                && rec.preprocess.height.is_none()
+            {
+                rec.preprocess.max_dim = Some(args.tile_max_dim.max(32));
+            }
+            let out = run_pipeline(&src_img, &rec)?;
+            Ok((label, rec, out))
+        })
+        .collect();
     let rendered = rendered?;
 
     let mut variant_reports = Vec::with_capacity(rendered.len());

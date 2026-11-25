@@ -3,11 +3,11 @@
 use anyhow::Result;
 use clap::{Args, ValueEnum};
 
-use crate::dither::Algorithm;
-use crate::generate::Pattern;
-use crate::palette::list_builtin_palettes;
-use crate::preset::list_all_presets;
-use crate::recipe::build_capabilities;
+use crate::commands::capabilities::build_capabilities;
+use dith_core::dither::Algorithm;
+use dith_core::generate::Pattern;
+use dith_core::palette::list_builtin_palettes;
+use dith_core::preset::list_all_presets;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ListKind {

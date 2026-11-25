@@ -13,6 +13,7 @@ readme = "README.md"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 crossterm = "0.29"
+dith-core = { path = "crates/dith-core" }
 flate2 = "1"
 gif = "0.14"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }

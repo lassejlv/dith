@@ -2,7 +2,6 @@
 
 use std::sync::{LazyLock, OnceLock};
 
-use clap::ValueEnum;
 use image::{Rgba, RgbaImage};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -11,17 +10,18 @@ use crate::color::{ColorSpace, LinearRgb, Rgb, srgb_u8_to_linear};
 use crate::palette::{Palette, SplitMix64};
 
 /// All supported dithering algorithms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum Algorithm {
     /// Classic Floyd-Steinberg 4-neighbor error diffusion (balanced, detailed).
     #[default]
-    #[value(alias = "fs")]
+    #[cfg_attr(feature = "clap", value(alias = "fs"))]
     FloydSteinberg,
     /// Bill Atkinson's `MacPaint` diffusion (6/8 diffused: crisp, airy, editorial).
     Atkinson,
     /// Jarvis-Judice-Ninke 12-neighbor error diffusion (silky smooth gradients).
-    #[value(alias = "jjn")]
+    #[cfg_attr(feature = "clap", value(alias = "jjn"))]
     JarvisJudiceNinke,
     /// Stucki 12-neighbor diffusion (crisper variant of JJN).
     Stucki,

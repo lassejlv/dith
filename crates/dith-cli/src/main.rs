@@ -5,8 +5,14 @@ use std::process::ExitCode;
 use clap::Parser;
 use serde::Serialize;
 
-use dith::cli::{Cli, dispatch};
-use dith::recipe::RecipeError;
+mod cli;
+mod commands;
+mod update;
+mod viewer;
+
+use dith_core::RecipeError;
+
+use crate::cli::{Cli, dispatch};
 
 #[derive(Serialize)]
 struct ErrorEnvelope {

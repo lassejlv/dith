@@ -1,6 +1,5 @@
 //! Image resizing, tonal adjustment, sharpening/blurring, and alpha handling before dithering.
 
-use clap::ValueEnum;
 use image::imageops::{self, FilterType};
 use image::{Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
@@ -8,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::color::{Rgb, linear_to_srgb_u8, srgb_u8_to_linear};
 
 /// How to fit an image when both `--width` and `--height` are specified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum FitMode {
     /// Fit inside target dimensions while preserving aspect ratio.
@@ -21,7 +21,8 @@ pub enum FitMode {
 }
 
 /// How to treat transparent pixels during dithering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum AlphaMode {
     /// Keep original alpha channel intact; fully transparent pixels do not diffuse error.

@@ -8,12 +8,12 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
-use crate::color::{ColorSpace, Rgb};
-use crate::dither::Algorithm;
-use crate::output::{OutputFormat, SvgShape};
-use crate::palette::Palette;
-use crate::preprocess::{AlphaMode, FitMode};
-use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError};
+use dith_core::color::{ColorSpace, Rgb};
+use dith_core::dither::Algorithm;
+use dith_core::output::{OutputFormat, SvgShape};
+use dith_core::palette::Palette;
+use dith_core::preprocess::{AlphaMode, FitMode};
+use dith_core::recipe::{DitherRecipe, PaletteSpec, RecipeError};
 
 pub use crate::commands::animate::AnimateArgs;
 pub use crate::commands::apply::ApplyArgs;
@@ -21,11 +21,8 @@ pub use crate::commands::batch::BatchArgs;
 pub use crate::commands::compare::CompareArgs;
 pub use crate::commands::generate::GenerateArgs;
 pub use crate::commands::inspect::InspectArgs;
-pub use crate::commands::list::{ListArgs, ListKind};
-pub use crate::commands::preset::{
-    PresetArgs, PresetCommand, PresetDeleteArgs, PresetListArgs, PresetSaveArgs, PresetShowArgs,
-    PresetSourceFilter,
-};
+pub use crate::commands::list::ListArgs;
+pub use crate::commands::preset::PresetArgs;
 pub use crate::commands::preview::PreviewArgs;
 pub use crate::commands::update::UpdateArgs;
 use crate::commands::{
