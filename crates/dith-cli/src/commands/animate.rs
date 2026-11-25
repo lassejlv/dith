@@ -7,23 +7,23 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 
-use crate::animate::{
+use crate::cli::{DitherFlags, PreviewMode};
+use crate::viewer::{FullscreenAnimInput, ViewerBackend, run_fullscreen_animation_viewer};
+use dith_core::animate::{
     AnimDitherOptions, AnimFormat, AnimFrame, AnimatedOutput, Easing, FloatRange, ProceduralMotion,
     ScreenDrift, SweepMode, TemporalMode, U32Range, apply_holds, apply_ping_pong,
     compose_spritesheet, decode_animated_frames, dither_animation_frames, encode_apng, encode_gif,
     generate_procedural_frames, write_frames_directory,
 };
-use crate::cli::{DitherFlags, PreviewMode};
-use crate::color::{ColorSpace, Rgb};
-use crate::generate::{GenerateOptions, Pattern};
-use crate::output::{
+use dith_core::color::{ColorSpace, Rgb};
+use dith_core::generate::{GenerateOptions, Pattern};
+use dith_core::output::{
     ColorUsage, OutputFormat, encode_image, render_ascii, render_braille, write_output_file,
 };
-use crate::palette::Palette;
-use crate::preprocess::{FitMode, plan_dimensions};
-use crate::preset::{OverwritePolicy, PresetScope, SavePresetRequest, save_local_preset};
-use crate::recipe::{DitherRecipe, RecipeError};
-use crate::viewer::{FullscreenAnimInput, ViewerBackend, run_fullscreen_animation_viewer};
+use dith_core::palette::Palette;
+use dith_core::preprocess::{FitMode, plan_dimensions};
+use dith_core::preset::{OverwritePolicy, PresetScope, SavePresetRequest, save_local_preset};
+use dith_core::recipe::{DitherRecipe, RecipeError};
 
 use super::shared::{emit_inline_kitty, load_input_image, palette_spec_label};
 

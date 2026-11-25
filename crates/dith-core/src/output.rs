@@ -7,7 +7,6 @@ use std::io::{self, Cursor, IsTerminal};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use clap::ValueEnum;
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +16,8 @@ use crate::color::Rgb;
 const KITTY_CHUNK_SIZE: usize = 4096;
 
 /// Supported output file and terminal formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum OutputFormat {
     /// Lossless PNG (recommended for crisp pixel-exact dithers).
@@ -44,7 +44,8 @@ pub enum OutputFormat {
 }
 
 /// Shape primitives used when exporting `--format svg`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum SvgShape {
     /// Horizontal run-length merged crisp pixel rectangles (smallest file size).

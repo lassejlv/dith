@@ -7,17 +7,17 @@ use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 
-use crate::animate::{AnimDitherOptions, decode_animated_frames, dither_animation_frames};
 use crate::cli::{DitherFlags, PreviewMode};
-use crate::color::Rgb;
-use crate::generate::{GenerateOptions, Pattern, generate_pattern};
-use crate::output::{ColorUsage, KittyOptions, render_ascii, render_braille, render_kitty};
-use crate::palette::Palette;
-use crate::recipe::run_pipeline;
 use crate::viewer::{
     FullscreenAnimInput, FullscreenViewerInput, ViewerBackend, run_fullscreen_animation_viewer,
     run_fullscreen_viewer,
 };
+use dith_core::animate::{AnimDitherOptions, decode_animated_frames, dither_animation_frames};
+use dith_core::color::Rgb;
+use dith_core::generate::{GenerateOptions, Pattern, generate_pattern};
+use dith_core::output::{ColorUsage, KittyOptions, render_ascii, render_braille, render_kitty};
+use dith_core::palette::Palette;
+use dith_core::recipe::run_pipeline;
 
 use super::shared::load_input_image;
 
@@ -205,7 +205,7 @@ pub(crate) fn handle_preview(args: &PreviewArgs, as_json: bool) -> Result<()> {
     }
 
     let (img, algorithm, palette_name, palette_colors, elapsed_ms, color_usage) = if args.raw {
-        let hist = crate::output::color_histogram(&src_img);
+        let hist = dith_core::output::color_histogram(&src_img);
         (src_img, None, None, None, 0, hist)
     } else {
         let out = dithered_out.expect("dithered pipeline ran for non-raw preview");

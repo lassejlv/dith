@@ -4,7 +4,6 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -17,7 +16,8 @@ pub struct ParseColorError {
 }
 
 /// Color space used for error diffusion and nearest-palette distance matching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum ColorSpace {
     /// Perceptually uniform Oklab matching with linear-light error diffusion (recommended).

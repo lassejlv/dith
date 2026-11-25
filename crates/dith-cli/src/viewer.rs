@@ -11,8 +11,8 @@ use crossterm::{cursor, execute, queue};
 use image::RgbaImage;
 use rayon::prelude::*;
 
-use crate::animate::AnimFrame;
-use crate::output::{
+use dith_core::animate::AnimFrame;
+use dith_core::output::{
     KittyOptions, encode_fast_png_bytes, encode_kitty_png, kitty_clear_sequence, render_ascii,
     render_braille,
 };

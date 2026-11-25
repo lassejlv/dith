@@ -11,7 +11,6 @@ use std::str::FromStr;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use clap::ValueEnum;
 use image::codecs::gif::GifDecoder;
 use image::codecs::png::PngDecoder;
 use image::codecs::webp::WebPDecoder;
@@ -146,7 +145,8 @@ impl FromStr for ScreenDrift {
 }
 
 /// Easing curve applied to procedural phase and parameter sweeps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum Easing {
     /// Constant steady velocity across the loop.
@@ -217,7 +217,8 @@ fn ease_out_bounce(t: f32) -> f32 {
 }
 
 /// How parameter sweeps (`--sweep-*`) progress over the animation timeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum SweepMode {
     /// Progress cleanly from `start` on frame 0 to `end` on the final frame.
@@ -250,7 +251,8 @@ impl SweepMode {
 }
 
 /// Controls how the dither pattern evolves across animation frames.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum TemporalMode {
     /// Fixed screen & seed across frames. Ordered, blue-noise, ign, and random algorithms leave unchanged
@@ -290,7 +292,8 @@ impl TemporalMode {
 }
 
 /// Output container format for animated dithers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum AnimFormat {
     /// Lossless exact-palette looping GIF (direct global color table, tiny file size).

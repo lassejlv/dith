@@ -2,7 +2,6 @@
 
 use std::f32::consts::TAU;
 
-use clap::ValueEnum;
 use image::RgbaImage;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -11,7 +10,8 @@ use crate::color::{Oklab, Rgb};
 use crate::palette::SplitMix64;
 
 /// Built-in procedural source patterns fed into the dithering pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum Pattern {
     /// Smooth multi-stop linear gradient interpolated in Oklab.

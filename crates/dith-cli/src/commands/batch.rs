@@ -8,9 +8,9 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::cli::DitherFlags;
-use crate::output::{OutputFormat, encode_image, write_output_file};
-use crate::preprocess::plan_dimensions;
-use crate::recipe::run_pipeline;
+use dith_core::output::{OutputFormat, encode_image, write_output_file};
+use dith_core::preprocess::plan_dimensions;
+use dith_core::recipe::run_pipeline;
 
 use super::shared::load_input_image;
 

@@ -7,11 +7,11 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::cli::DitherFlags;
-use crate::preset::{
+use dith_core::preset::{
     OverwritePolicy, PresetScope, PresetSource, SavePresetRequest, delete_local_preset,
     list_all_presets, resolve_preset, save_local_preset,
 };
-use crate::recipe::{DitherRecipe, RecipeError};
+use dith_core::recipe::{DitherRecipe, RecipeError};
 
 #[derive(Debug, Args)]
 pub struct PresetArgs {

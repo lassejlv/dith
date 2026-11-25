@@ -58,6 +58,10 @@ struct GithubAsset {
 /// # Errors
 /// Returns an error on platforms without prebuilt release artifacts (only macOS ARM, Linux
 /// Intel `x86_64`, and Linux ARM `aarch64` are shipped as prebuilt binaries).
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "only platforms without prebuilt binaries take the Err branch"
+)]
 pub const fn detect_target() -> Result<&'static str, &'static str> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {

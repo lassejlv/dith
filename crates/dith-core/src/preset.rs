@@ -5,7 +5,6 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -46,7 +45,8 @@ pub enum PresetStoreError {
 }
 
 /// Where to store or manage a local preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum PresetScope {
     /// Save inside the current workspace at `.dith/presets/<name>.json`.
@@ -57,7 +57,8 @@ pub enum PresetScope {
 }
 
 /// Origin of a discovered preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum PresetSource {
     /// Loaded from `$DITH_PRESETS_DIR`.
