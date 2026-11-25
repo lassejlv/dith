@@ -34,7 +34,7 @@ curl -fsSL https://cdn.diths.design/install.sh | bash
 dith update
 
 # Or install from source
-cargo install --git https://github.com/lassejlv/dith
+cargo install --git https://github.com/lassejlv/diths
 
 # Local dev build
 mbx build --release

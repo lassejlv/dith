@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 /// GitHub repository slug hosting official releases (`owner/repo`).
-pub const GITHUB_REPO: &str = "lassejlv/dith";
+pub const GITHUB_REPO: &str = "lassejlv/diths";
 
 /// Options controlling `dith update`.
 #[derive(Debug, Clone)]
@@ -82,7 +82,7 @@ pub const fn detect_target() -> Result<&'static str, &'static str> {
     )))]
     {
         Err(
-            "prebuilt binaries are only published for macOS ARM (aarch64-apple-darwin), Linux Intel (x86_64-unknown-linux-gnu), and Linux ARM (aarch64-unknown-linux-gnu); update from source via `cargo install --git https://github.com/lassejlv/dith --force`",
+            "prebuilt binaries are only published for macOS ARM (aarch64-apple-darwin), Linux Intel (x86_64-unknown-linux-gnu), and Linux ARM (aarch64-unknown-linux-gnu); update from source via `cargo install --git https://github.com/lassejlv/diths --force`",
         )
     }
 }

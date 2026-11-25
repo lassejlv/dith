@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="lassejlv/dith"
+REPO="lassejlv/diths"
 INSTALL_DIR="${DITH_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${DITH_VERSION:-latest}"
 INSTALL_SKILLS=1

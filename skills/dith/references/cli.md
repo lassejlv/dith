@@ -29,7 +29,7 @@ dith update --check --json     # only report whether a newer release exists
 dith update                    # install latest; --version v0.2.0 to pin, --force to reinstall, --no-skills to skip skills
 
 # From source (any platform with Rust)
-cargo install --git https://github.com/lassejlv/dith
+cargo install --git https://github.com/lassejlv/diths
 
 # Inside the dith source checkout
 cargo run --release -- --help
