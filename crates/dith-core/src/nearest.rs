@@ -20,11 +20,15 @@ use crate::palette::Palette;
 
 /// Grid cells per axis.
 const GRID: usize = 32;
-/// A sample's cell along one axis is looked up by the top bits of its `f32` pattern: the exponent
-/// and the first five mantissa bits, 32 keys per octave.
+/// A sample's cell along one axis is looked up by the top bits of its `f32` pattern: the sign, the
+/// exponent and the first five mantissa bits, 32 keys per octave.
 const KEY_SHIFT: u32 = 18;
-/// Number of keys covering `0.0..=1.0`.
-const KEYS: usize = (1.0f32.to_bits() >> KEY_SHIFT) as usize + 1;
+/// Number of keys: every `f32` bit pattern has one.
+const KEY_COUNT: usize = 1 << (32 - KEY_SHIFT);
+/// The key of `1.0`. Keys above it, and every negative key, hold [`OUTSIDE`].
+const KEY_ONE: usize = (1.0f32.to_bits() >> KEY_SHIFT) as usize;
+/// Marks keys of values outside `0.0..=1.0` (including `-0.0`, which the full scan handles).
+const OUTSIDE: u8 = 0x80;
 /// Longest candidate list stored in a cell (seven `u8` indices beside the length byte).
 const MAX_SHORTLIST: usize = 7;
 /// Candidate sets larger than this are not pruned pairwise; the cell falls back to a full scan.
@@ -57,8 +61,8 @@ const OKLAB_FROM_LMS: [[f32; 3]; 3] = [
 /// How one axis of the working space is cut into [`GRID`] cells.
 #[derive(Debug)]
 struct Axis {
-    /// Cell of every key.
-    cell_of_key: [u8; KEYS],
+    /// Cell of every key, or [`OUTSIDE`].
+    cell_of_key: [u8; KEY_COUNT],
     /// `edges[c]..=edges[c + 1]` contains every sample of cell `c`.
     edges: [f64; GRID + 1],
 }
@@ -66,11 +70,11 @@ struct Axis {
 impl Axis {
     /// Cut the axis so that cells are evenly sized after `spacing` (monotonic, `0..=1` to `0..=1`).
     fn new(spacing: impl Fn(f64) -> f64) -> Self {
-        let mut cell_of_key = [0u8; KEYS];
+        let mut cell_of_key = [OUTSIDE; KEY_COUNT];
         let mut edges = [1.0; GRID + 1];
         edges[0] = 0.0;
         let mut previous = 0;
-        for (key, slot) in cell_of_key.iter_mut().enumerate() {
+        for (key, slot) in cell_of_key[..=KEY_ONE].iter_mut().enumerate() {
             let lowest = f64::from(f32::from_bits((key as u32) << KEY_SHIFT));
             let cell = ((spacing(lowest) * GRID as f64) as usize).min(GRID - 1);
             for edge in &mut edges[previous + 1..=cell] {
@@ -144,30 +148,47 @@ impl<'a> Matcher<'a> {
     /// [`Palette::nearest_index_from_linear`] / [`Palette::nearest_index_from_srgb`].
     #[inline]
     pub(crate) fn nearest(&self, sample: [f32; 3]) -> usize {
-        let [r, g, b] = sample;
-        if let Some(grid) = self.grid
-            && (0.0..=1.0).contains(&r)
-            && (0.0..=1.0).contains(&g)
-            && (0.0..=1.0).contains(&b)
-        {
-            // The range check admits -0.0, whose sign bit must not reach the key.
-            let cell_of = |v: f32| {
-                usize::from(self.axis.cell_of_key[(v.abs().to_bits() >> KEY_SHIFT) as usize])
-            };
-            let index = cell_of(r) + GRID * (cell_of(g) + GRID * cell_of(b));
-            let mut cell = grid.cells[index].load(Ordering::Relaxed);
-            if cell == UNSET {
-                cell = self.fill_cell(grid, index);
-            }
-            let len = cell & 0xFF;
-            if len == 1 {
-                return ((cell >> 8) & 0xFF) as usize;
-            }
-            if len != FULL_SCAN {
-                return self.scan_shortlist(sample, cell);
+        if let Some(grid) = self.grid {
+            let [cx, cy, cz] =
+                sample.map(|v| self.axis.cell_of_key[(v.to_bits() >> KEY_SHIFT) as usize]);
+            // `<= 1.0` rejects the values that share 1.0's key, and NaN.
+            if (cx | cy | cz) & OUTSIDE == 0
+                && sample[0] <= 1.0
+                && sample[1] <= 1.0
+                && sample[2] <= 1.0
+            {
+                let index = (usize::from(cx) | usize::from(cy) << 5 | usize::from(cz) << 10)
+                    & (GRID * GRID * GRID - 1);
+                let cell = grid.cells[index].load(Ordering::Relaxed);
+                if cell & 0xFF == 1 {
+                    return ((cell >> 8) & 0xFF) as usize;
+                }
+                return self.nearest_in_cell(grid, sample, index, cell);
             }
         }
         self.scan_all(sample)
+    }
+
+    /// The rest of [`Self::nearest`] once the cell is known, kept out of line so the common
+    /// single-candidate case stays small enough to inline.
+    #[inline(never)]
+    fn nearest_in_cell(
+        &self,
+        grid: &NearestGrid,
+        sample: [f32; 3],
+        index: usize,
+        cell: u64,
+    ) -> usize {
+        let cell = if cell == UNSET {
+            self.fill_cell(grid, index)
+        } else {
+            cell
+        };
+        match cell & 0xFF {
+            1 => ((cell >> 8) & 0xFF) as usize,
+            FULL_SCAN => self.scan_all(sample),
+            _ => self.scan_shortlist(sample, cell),
+        }
     }
 
     /// The reference full scan.

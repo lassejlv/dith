@@ -645,22 +645,20 @@ fn diffuse_kernel<const SAME: usize, const NEXT: usize, const AFTER: usize>(
         let src_row = &src[y * w * 4..(y + 1) * w * 4];
         let out_row = &mut dst[y * w * 4..(y + 1) * w * 4];
         // Error for the very next pixel stays out of the row buffer until that pixel is read.
-        let mut ahead: Option<[f32; 3]> = None;
+        // Where there is none yet it is zero: adding it can only turn -0.0 into +0.0, and no
+        // palette choice depends on the sign of a zero (see `quantization_sample`).
+        let mut ahead = [0.0f32; 3];
         for step in 0..w {
             let x = if reverse { w - 1 - step } else { step };
             let alpha = src_row[x * 4 + 3];
             if alpha == 0 {
-                ahead = None;
+                ahead = [0.0; 3];
                 continue;
             }
 
             let i = x + ROW_PAD;
-            let mut bpx = rows.current[i];
-            if let Some(err) = ahead {
-                bpx[0] += err[0];
-                bpx[1] += err[1];
-                bpx[2] += err[2];
-            }
+            let cell = rows.current[i];
+            let bpx = [cell[0] + ahead[0], cell[1] + ahead[1], cell[2] + ahead[2]];
             let cur = quantization_sample(bpx, bias, noise, &mut rng);
             let chosen_idx = matcher.nearest(cur);
             let chosen_rgb = palette_rgb[chosen_idx];
@@ -674,7 +672,7 @@ fn diffuse_kernel<const SAME: usize, const NEXT: usize, const AFTER: usize>(
 
             // Compute un-biased quantization error so bias doesn't accumulate unboundedly.
             let err = diffusion_error(bpx, chosen_work, strength);
-            ahead = Some([err[0] * same[0], err[1] * same[0], err[2] * same[0]]);
+            ahead = [err[0] * same[0], err[1] * same[0], err[2] * same[0]];
             for (distance, &factor) in same.iter().enumerate().skip(1) {
                 let n = i.wrapping_add_signed((distance as isize + 1) * dir);
                 add_error(&mut rows.current[n], err, factor);
@@ -705,8 +703,10 @@ fn quantization_sample(bpx: [f32; 3], bias: f32, noise: f32, rng: &mut SplitMix6
         return bpx.map(|v| (v + bias + jitter).clamp(0.0, 1.0));
     }
     if bias == 0.0 {
-        // `v + 0.0 + 0.0` only ever turns -0.0 into 0.0, and no distance depends on the sign
-        // of a zero, so the two additions can be skipped.
+        // `v + 0.0 + 0.0` only ever turns -0.0 into 0.0, so the two additions can be skipped.
+        // The sign of a zero never changes a palette choice: every distance squares the
+        // difference, -0.0 - c equals 0.0 - c, and Oklab clamps negatives to zero first. Any
+        // value computed from a zero of either sign is then equal up to that sign as well.
         return bpx.map(|v| v.clamp(0.0, 1.0));
     }
     bpx.map(|v| (v + bias + 0.0).clamp(0.0, 1.0))
@@ -804,23 +804,19 @@ fn diffuse_ostromoukhov(img: &RgbaImage, palette: &Palette, opts: &DitherOptions
         let dir: isize = if reverse { -1 } else { 1 };
         let src_row = &src[y * w * 4..(y + 1) * w * 4];
         let out_row = &mut dst[y * w * 4..(y + 1) * w * 4];
-        let mut ahead: Option<[f32; 3]> = None;
+        let mut ahead = [0.0f32; 3];
         for step in 0..w {
             let x = if reverse { w - 1 - step } else { step };
             let px = &src_row[x * 4..x * 4 + 4];
             let alpha = px[3];
             if alpha == 0 {
-                ahead = None;
+                ahead = [0.0; 3];
                 continue;
             }
 
             let i = x + ROW_PAD;
-            let mut bpx = rows.current[i];
-            if let Some(err) = ahead {
-                bpx[0] += err[0];
-                bpx[1] += err[1];
-                bpx[2] += err[2];
-            }
+            let cell = rows.current[i];
+            let bpx = [cell[0] + ahead[0], cell[1] + ahead[1], cell[2] + ahead[2]];
             let cur = quantization_sample(bpx, bias, noise, &mut rng);
             let chosen_idx = matcher.nearest(cur);
             let chosen_rgb = palette_rgb[chosen_idx];
@@ -838,11 +834,11 @@ fn diffuse_ostromoukhov(img: &RgbaImage, palette: &Palette, opts: &DitherOptions
                     .round()
                     .clamp(0.0, 255.0) as u8;
             let weights = ostromoukhov_weights(luma);
-            ahead = Some([
+            ahead = [
                 err[0] * weights[0],
                 err[1] * weights[0],
                 err[2] * weights[0],
-            ]);
+            ];
             add_error(&mut rows.next[i.wrapping_add_signed(-dir)], err, weights[1]);
             add_error(&mut rows.next[i], err, weights[2]);
         }
