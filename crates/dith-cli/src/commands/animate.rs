@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 
-use crate::cli::{DitherFlags, OverlayFlags, PreviewMode};
+use crate::cli::{DitherFlags, InflateFlags, OverlayFlags, PreviewMode};
 use crate::viewer::{FullscreenAnimInput, ViewerBackend, run_fullscreen_animation_viewer};
 use dith_core::animate::{
     AnimDitherOptions, AnimFormat, AnimFrame, AnimatedOutput, Easing, FloatRange, ProceduralMotion,
@@ -235,6 +235,9 @@ pub struct AnimateArgs {
     /// order) or a comma-separated list, one file per frame before --ping-pong and holds.
     #[arg(long, value_name = "DIR|LIST")]
     pub overlay_frames: Option<String>,
+
+    #[command(flatten)]
+    pub inflate: InflateFlags,
 
     #[command(flatten)]
     pub overlay: OverlayFlags,
@@ -620,6 +623,19 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         AnimateSource::Gif(p) | AnimateSource::StaticBoil(p) => p.display().to_string(),
         AnimateSource::Sequence(list) => format!("sequence({} files)", list.len()),
     };
+    match &source {
+        AnimateSource::Procedural(pattern) => {
+            args.inflate.params(*pattern)?;
+        }
+        _ if !args.inflate.shape.is_empty() || args.inflate.paint.is_some() => {
+            return Err(RecipeError::Validation {
+                field: "shape",
+                reason: "--shape and --paint only apply to `dith animate inflate`".to_string(),
+            }
+            .into());
+        }
+        _ => {}
+    }
     let timings = args.timings.as_deref().map(read_timings).transpose()?;
     if timings.is_some()
         && let AnimateSource::Sequence(list) = &source
@@ -975,6 +991,8 @@ fn load_source_frames(
                 seed: recipe.dither.seed,
                 phase: 0.0,
                 motion_amplitude: args.motion_amplitude,
+                inflate: args.inflate.params(pattern)?,
+                shape: args.inflate.load_shape(pattern, gen_w, gen_h)?,
             };
             generate_procedural_frames(
                 &gen_opts,

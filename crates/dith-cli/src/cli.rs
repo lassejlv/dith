@@ -2,7 +2,8 @@
 
 use std::fs;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -10,7 +11,10 @@ use serde::Serialize;
 
 use dith_core::color::{ColorSpace, Rgb};
 use dith_core::dither::Algorithm;
+use dith_core::generate::Pattern;
+use dith_core::inflate::{InflateParams, InflateShape, ShapeChannel};
 use dith_core::ink::SolidInk;
+use dith_core::input::image_dimensions;
 use dith_core::output::{OutputFormat, SvgShape};
 use dith_core::overlay::{OverlayAlpha, check_overlay};
 use dith_core::palette::Palette;
@@ -477,6 +481,120 @@ impl OverlayFlags {
         overlay.color = self.overlay_color.or(overlay.color);
         overlay.alpha = self.overlay_alpha.unwrap_or(overlay.alpha);
         overlay.layers.iter().try_for_each(|p| check_overlay(p))
+    }
+}
+
+/// Shape, form and lighting flags for the `inflate` generator (`generate` and `animate`).
+#[derive(Debug, Clone, Args)]
+pub struct InflateFlags {
+    /// Shape to inflate: an SVG (each top-level element is its own shape) or a PNG. Repeatable.
+    /// The shape is stretched to the canvas, so draw it with the canvas's aspect ratio.
+    #[arg(long, value_name = "SVG|PNG")]
+    pub shape: Vec<PathBuf>,
+
+    /// Which channel marks a shape's filled area: alpha (default), luminance (light = filled), or darkness (dark = filled).
+    #[arg(long, value_enum, default_value_t = ShapeChannel::Alpha)]
+    pub shape_channel: ShapeChannel,
+
+    /// How puffed up the surface is (0.05..=4.0, 1.0 = a disc becomes a hemisphere).
+    #[arg(long, default_value_t = 1.0)]
+    pub depth: f32,
+
+    /// Glossy highlight strength (0.0..=2.0, default 0.42 as on sphere).
+    #[arg(long, default_value_t = 0.42)]
+    pub specular: f32,
+
+    /// Rim light strength along the outline (0.0..=2.0, default 0.28).
+    #[arg(long, default_value_t = 0.28)]
+    pub rim: f32,
+
+    /// Floor brightness of surfaces facing away from the light (0.0..=1.0, default 0.08).
+    #[arg(long, default_value_t = 0.08)]
+    pub ambient: f32,
+
+    /// Smooth-union width in pixels that melts several shapes into one soft body (0 = hard union).
+    #[arg(long, default_value_t = 0.0)]
+    pub blend: f32,
+
+    /// Draw a soft elliptical shadow under the shape, optionally with its darkness (0.0..=1.0, default 0.35).
+    #[arg(long, value_name = "DARKNESS", num_args = 0..=1, default_missing_value = "0.35")]
+    pub ground_shadow: Option<f32>,
+
+    /// Surface paint (SVG or PNG over the same canvas): darker paint darkens the lit surface, so
+    /// blush, patches and stripes stay part of the dither. Transparent = unpainted.
+    #[arg(long, value_name = "SVG|PNG")]
+    pub paint: Option<PathBuf>,
+}
+
+impl InflateFlags {
+    /// Validate the flags for `pattern` and return the inflate parameters.
+    ///
+    /// # Errors
+    /// Returns [`RecipeError`] when inflate is missing a shape, another pattern gets one, a value is
+    /// out of range, or a shape or paint file cannot be read.
+    pub fn params(&self, pattern: Pattern) -> Result<InflateParams, RecipeError> {
+        let is_inflate = pattern == Pattern::Inflate;
+        if is_inflate && self.shape.is_empty() {
+            return Err(RecipeError::Validation {
+                field: "shape",
+                reason: "inflate needs --shape <svg|png>".to_string(),
+            });
+        }
+        if !is_inflate && (!self.shape.is_empty() || self.paint.is_some()) {
+            return Err(RecipeError::Validation {
+                field: "shape",
+                reason: format!(
+                    "--shape and --paint only apply to inflate, not {}",
+                    pattern.id()
+                ),
+            });
+        }
+        let params = InflateParams {
+            depth: self.depth,
+            specular: self.specular,
+            rim: self.rim,
+            ambient: self.ambient,
+            blend: self.blend,
+            ground_shadow: self.ground_shadow.unwrap_or(0.0),
+        };
+        params.validate()?;
+        for (kind, path) in self
+            .shape
+            .iter()
+            .map(|p| ("shape", p))
+            .chain(self.paint.iter().map(|p| ("paint", p)))
+        {
+            image_dimensions(path).map_err(|e| RecipeError::InvalidAsset {
+                kind,
+                path: path.display().to_string(),
+                reason: format!("{e:#}"),
+            })?;
+        }
+        Ok(params)
+    }
+
+    /// Load the shapes at canvas size (`None` for other patterns).
+    ///
+    /// # Errors
+    /// Returns [`RecipeError::InvalidAsset`] when a shape or paint file cannot be loaded.
+    pub fn load_shape(
+        &self,
+        pattern: Pattern,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<Arc<InflateShape>>, RecipeError> {
+        if pattern != Pattern::Inflate {
+            return Ok(None);
+        }
+        let shapes: Vec<&Path> = self.shape.iter().map(PathBuf::as_path).collect();
+        InflateShape::load(
+            &shapes,
+            self.shape_channel,
+            self.paint.as_deref(),
+            width,
+            height,
+        )
+        .map(|s| Some(Arc::new(s)))
     }
 }
 

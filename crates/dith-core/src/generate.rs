@@ -1,12 +1,14 @@
 //! Procedural artwork generators so agents can create dithered graphics from scratch.
 
 use std::f32::consts::TAU;
+use std::sync::Arc;
 
 use image::RgbaImage;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::{Oklab, Rgb};
+use crate::inflate::{InflateParams, InflateShape, inflate_tones};
 use crate::palette::SplitMix64;
 
 /// Built-in procedural source patterns fed into the dithering pipeline.
@@ -33,6 +35,8 @@ pub enum Pattern {
     Plasma,
     /// Soft shaded geometric perspective checkerboard.
     Checkerboard,
+    /// A drawn shape (`--shape` SVG or PNG) puffed up like a pillow and lit like `sphere`.
+    Inflate,
 }
 
 /// Static metadata for discovering generators via `list` / `capabilities`.
@@ -57,6 +61,7 @@ impl Pattern {
         Self::Rings,
         Self::Plasma,
         Self::Checkerboard,
+        Self::Inflate,
     ];
 
     #[must_use]
@@ -71,6 +76,7 @@ impl Pattern {
             Self::Rings => "rings",
             Self::Plasma => "plasma",
             Self::Checkerboard => "checkerboard",
+            Self::Inflate => "inflate",
         }
     }
 
@@ -140,6 +146,13 @@ impl Pattern {
                 best_for: "Architectural graphics, retro UI tiles, graphic posters",
                 motion: "Grid scrolls diagonally 2 x round(--motion-amplitude) cells per loop while the vignette light orbits.",
             },
+            Self::Inflate => PatternInfo {
+                id: "inflate",
+                name: "Inflated Shape",
+                description: "Your own --shape (SVG or PNG) puffed up from its distance field like a pillow, several shapes melted together with --blend, lit like sphere with an optional ground shadow and --paint tones",
+                best_for: "Custom characters, mascots, icons and logos with soft 3D shading",
+                motion: "Shape stays still; the key light orbits 360 degrees around it like sphere. Pass --cycles 0 to keep the light still (for blinks driven by --overlay-frames).",
+            },
         }
     }
 }
@@ -164,6 +177,12 @@ pub struct GenerateOptions {
     /// Scales procedural motion travel/orbit amplitude (`0.0` = still, `1.0` = default, `2.0` = dramatic).
     #[serde(default = "default_motion_amplitude")]
     pub motion_amplitude: f32,
+    /// Form and lighting of the `inflate` pattern.
+    #[serde(default)]
+    pub inflate: InflateParams,
+    /// Shapes for the `inflate` pattern, at this canvas size (a centred disc when `None`).
+    #[serde(skip)]
+    pub shape: Option<Arc<InflateShape>>,
 }
 
 const fn default_motion_amplitude() -> f32 {
@@ -182,6 +201,8 @@ impl Default for GenerateOptions {
             seed: 42,
             phase: 0.0,
             motion_amplitude: 1.0,
+            inflate: InflateParams::default(),
+            shape: None,
         }
     }
 }
@@ -209,6 +230,20 @@ pub fn generate_pattern(opts: &GenerateOptions) -> RgbaImage {
         Pattern::Rings => render_rings(w, h, opts.frequency, phase, amp, &stops),
         Pattern::Plasma => render_plasma(w, h, opts.frequency, phase, amp, &stops),
         Pattern::Checkerboard => render_checkerboard(w, h, opts.frequency, phase, amp, &stops),
+        Pattern::Inflate => {
+            let fallback;
+            let shape = match &opts.shape {
+                Some(s) if (s.width, s.height) == (w, h) => s.as_ref(),
+                _ => {
+                    fallback = InflateShape::default_disc(w, h);
+                    &fallback
+                }
+            };
+            let tones = inflate_tones(shape, opts.angle, phase, amp, &opts.inflate);
+            render_parallel(w, h, |x, y| {
+                sample_stops(&stops, tones[(y * w + x) as usize])
+            })
+        }
     }
 }
 
@@ -407,7 +442,7 @@ fn render_sphere(
 
 /// Soft highlight roll-off: values above the knee compress smoothly towards 1.0 instead of
 /// clipping, so bright highlights keep tonal detail rather than becoming a flat patch.
-fn highlight_shoulder(v: f32) -> f32 {
+pub(crate) fn highlight_shoulder(v: f32) -> f32 {
     const KNEE: f32 = 0.78;
     if v <= KNEE {
         return v.max(0.0);

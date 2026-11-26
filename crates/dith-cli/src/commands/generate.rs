@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Args;
 
-use crate::cli::{DitherFlags, OverlayFlags};
+use crate::cli::{DitherFlags, InflateFlags, OverlayFlags};
 use crate::viewer::{FullscreenViewerInput, ViewerBackend, run_fullscreen_viewer};
 use dith_core::color::Rgb;
 use dith_core::generate::{GenerateOptions, Pattern, generate_pattern};
@@ -88,6 +88,9 @@ pub struct GenerateArgs {
     pub fullscreen: bool,
 
     #[command(flatten)]
+    pub inflate: InflateFlags,
+
+    #[command(flatten)]
     pub overlay: OverlayFlags,
 
     #[command(flatten)]
@@ -97,6 +100,7 @@ pub struct GenerateArgs {
 pub(crate) fn handle_generate(args: &GenerateArgs, as_json: bool) -> Result<()> {
     let mut recipe = args.flags.resolve_recipe_for(true, true)?;
     args.overlay.apply(&mut recipe)?;
+    let inflate = args.inflate.params(args.pattern)?;
     let wants_view = args.view || args.fullscreen;
     let wants_fullscreen = wants_view && !args.inline;
     let format = resolve_output_format(args.output.as_deref(), recipe.export.format, wants_view)?;
@@ -132,6 +136,7 @@ pub(crate) fn handle_generate(args: &GenerateArgs, as_json: bool) -> Result<()> 
         frequency: args.frequency,
         stops,
         seed: recipe.dither.seed,
+        inflate,
         ..GenerateOptions::default()
     };
 
@@ -182,6 +187,10 @@ pub(crate) fn handle_generate(args: &GenerateArgs, as_json: bool) -> Result<()> 
         None
     };
 
+    let gen_opts = GenerateOptions {
+        shape: args.inflate.load_shape(args.pattern, gen_w, gen_h)?,
+        ..gen_opts
+    };
     let src_img = generate_pattern(&gen_opts);
     let output_data = run_pipeline(&src_img, &recipe)?;
 
