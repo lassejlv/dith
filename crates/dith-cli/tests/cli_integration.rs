@@ -2,6 +2,7 @@
 
 use std::process::Command;
 
+use image::AnimationDecoder;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -1103,6 +1104,8 @@ fn diff_counts_boxes_and_highlights_changes_between_images_and_frames() {
         "diff",
         &path("a.png"),
         &path("b.png"),
+        "-o",
+        &path("never.png"),
         "--dry-run",
         "--json",
     ]);
@@ -1156,4 +1159,158 @@ fn diff_counts_boxes_and_highlights_changes_between_images_and_frames() {
     let (ok, _, err) = run_json(&["diff", "--frames", &path("a.png"), "--json"]);
     assert!(!ok);
     assert_eq!(err["code"], "INVALID_ARGUMENT");
+}
+
+#[test]
+fn animate_sequences_take_per_frame_times_from_inputs_or_a_timings_file() {
+    let dir = TempDir::new().unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    for (name, shade) in [("a.png", 0u8), ("b.png", 255u8)] {
+        image::RgbaImage::from_pixel(24, 16, image::Rgba([shade, shade, shade, 255]))
+            .save(path(name))
+            .unwrap();
+    }
+    let timed = |name: &str, spec: &str| format!("{}:{spec}", path(name));
+
+    let (ok, apng, err) = run_json(&[
+        "animate",
+        &timed("a.png", "4200ms"),
+        &timed("b.png", "1f"),
+        &timed("a.png", "105ms"),
+        "-o",
+        &path("blink.apng"),
+        "--fps",
+        "20",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    let delays: Vec<u64> = apng["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["delay_ms"].as_u64().unwrap())
+        .collect();
+    assert_eq!(delays, vec![4200, 50, 105]);
+    assert_eq!(apng["total_duration_ms"], 4355);
+    assert_eq!(apng["timing_note"], Value::Null, "APNG keeps exact delays");
+    let decoded: Vec<u32> = image::codecs::png::PngDecoder::new(std::io::BufReader::new(
+        std::fs::File::open(path("blink.apng")).unwrap(),
+    ))
+    .unwrap()
+    .apng()
+    .unwrap()
+    .into_frames()
+    .map(|f| {
+        let (n, d) = f.unwrap().delay().numer_denom_ms();
+        n / d
+    })
+    .collect();
+    assert_eq!(decoded, vec![4200, 50, 105]);
+
+    let (ok, gif, err) = run_json(&[
+        "animate",
+        &timed("a.png", "4200ms"),
+        &timed("b.png", "1f"),
+        &timed("a.png", "105ms"),
+        "-o",
+        &path("blink.gif"),
+        "--fps",
+        "20",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    assert_eq!(gif["frames"][2]["encoded_delay_ms"], 110);
+    assert!(
+        gif["timing_note"]
+            .as_str()
+            .unwrap()
+            .contains("105 ms -> 110 ms")
+    );
+    assert_eq!(gif["frames"][1]["changed_pixels"], 24 * 16);
+    assert_eq!(gif["changed_pixels_total"], 2 * 24 * 16);
+
+    std::fs::write(path("t.json"), r#"[4200, "50ms", "2f"]"#).unwrap();
+    let three = [path("a.png"), path("b.png"), path("a.png")];
+    let (ok, from_file, err) = run_json(&[
+        "animate",
+        &three[0],
+        &three[1],
+        &three[2],
+        "-o",
+        &path("t.gif"),
+        "--timings",
+        &path("t.json"),
+        "--fps",
+        "20",
+        "--hold-end",
+        "1",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    let delays: Vec<u64> = from_file["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["delay_ms"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        delays,
+        vec![4200, 50, 100, 100],
+        "hold-end repeats the last frame at its delay"
+    );
+
+    let (ok, _, err) = run_json(&[
+        "animate",
+        &three[0],
+        &three[1],
+        "-o",
+        &path("x.gif"),
+        "--timings",
+        &path("t.json"),
+        "--json",
+    ]);
+    assert!(!ok);
+    assert!(
+        err["message"].as_str().unwrap().contains("3 frame times"),
+        "{err}"
+    );
+    let (ok, _, err) = run_json(&[
+        "animate",
+        &timed("a.png", "50ms"),
+        &three[1],
+        &three[2],
+        "-o",
+        &path("x.gif"),
+        "--timings",
+        &path("t.json"),
+        "--json",
+    ]);
+    assert!(!ok);
+    assert_eq!(err["code"], "INVALID_ARGUMENT");
+    let (ok, _, err) = run_json(&[
+        "animate",
+        &timed("a.png", "5ms"),
+        &three[1],
+        "-o",
+        &path("x.gif"),
+        "--json",
+    ]);
+    assert!(!ok);
+    assert!(
+        err["message"].as_str().unwrap().contains("10..=65535"),
+        "{err}"
+    );
+
+    let (ok, dry, err) = run_json(&[
+        "animate",
+        &timed("a.png", "4200ms"),
+        &timed("b.png", "50ms"),
+        "-o",
+        &path("dry.gif"),
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    assert_eq!(dry["total_duration_ms"], 4250);
+    assert!(!std::path::Path::new(&path("dry.gif")).exists());
 }

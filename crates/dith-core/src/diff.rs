@@ -215,7 +215,7 @@ mod tests {
         let a = canvas();
         let d = diff_images(&a, &a, 0).unwrap();
         assert_eq!((d.changed_pixels, d.bbox), (0, None));
-        assert!(d.changed_rows.is_empty());
+        assert_eq!(d.changed_rows, Vec::<[u32; 2]>::new());
 
         let mut b = a.clone();
         b.put_pixel(0, 0, Rgba([250, 255, 255, 255]));

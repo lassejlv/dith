@@ -1,7 +1,7 @@
 //! The `dith animate` command: procedural loops, GIF re-dithers, frame sequences, and boiled stills.
 
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use clap::{Args, ValueEnum};
@@ -13,7 +13,7 @@ use dith_core::animate::{
     AnimDitherOptions, AnimFormat, AnimFrame, AnimatedOutput, Easing, FloatRange, ProceduralMotion,
     ScreenDrift, SweepMode, TemporalMode, U32Range, apply_holds, apply_ping_pong,
     compose_spritesheet, decode_animated_frames, dither_animation_frames, encode_apng, encode_gif,
-    generate_procedural_frames, write_frames_directory,
+    generate_procedural_frames, gif_delay_centis, write_frames_directory,
 };
 use dith_core::color::{ColorSpace, Rgb};
 use dith_core::generate::{GenerateOptions, Pattern};
@@ -30,7 +30,13 @@ use super::shared::{emit_inline_kitty, load_input_image, palette_spec_label};
 #[derive(Debug, Args)]
 pub struct AnimateArgs {
     /// Input GIF, static photo (for animated film-boil), image sequence, or procedural pattern name (e.g. "sphere", "waves", "mesh").
+    /// Append ":4200ms" or ":84f" (84 frames at --fps) to a sequence file to set how long it shows.
     pub inputs: Vec<PathBuf>,
+
+    /// JSON list with one display time per frame (before --ping-pong and holds): milliseconds, or
+    /// "4200ms" / "84f" strings, e.g. [4200, 50, "2f", 50].
+    #[arg(long, value_name = "JSON")]
+    pub timings: Option<PathBuf>,
 
     /// Explicitly generate a seamless procedural loop instead of reading input files.
     #[arg(long, value_enum)]
@@ -110,11 +116,12 @@ pub struct AnimateArgs {
     #[arg(long)]
     pub ping_pong: bool,
 
-    /// Extra dwell frames holding on the first frame (e.g. dramatic opening pause).
+    /// Extra copies of the first frame, each at that frame's own delay (any source, frame sequences
+    /// included). For one long frame, set its time instead (file.png:4200ms or --timings).
     #[arg(long, default_value_t = 0)]
     pub hold_start: usize,
 
-    /// Extra dwell frames holding on the final frame (e.g. pause on finished reveal).
+    /// Extra copies of the final frame, each at that frame's own delay (any source).
     #[arg(long, default_value_t = 0)]
     pub hold_end: usize,
 
@@ -257,17 +264,160 @@ struct AnimateReport {
     bytes_written: usize,
     elapsed_ms: u128,
     color_usage: Vec<ColorUsage>,
+    /// Every output frame with its delay and how many pixels changed since the frame before.
+    frames: Vec<FrameEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changed_pixels_total: Option<u64>,
+    /// Set when the container cannot store some delays exactly (GIF keeps 10 ms steps).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timing_note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     saved_preset_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recipe: Option<DitherRecipe>,
 }
 
+#[derive(Debug, Serialize)]
+struct FrameEntry {
+    index: usize,
+    delay_ms: u32,
+    /// Delay the GIF actually stores (10 ms steps, 20 ms minimum).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoded_delay_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changed_pixels: Option<u64>,
+}
+
+/// How long one frame shows: milliseconds, or a number of frames at `--fps`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameTime {
+    Ms(u32),
+    Frames(u32),
+}
+
+impl FrameTime {
+    fn parse(spec: &str) -> Option<Self> {
+        let spec = spec.trim();
+        if let Some(n) = spec.strip_suffix("ms") {
+            return n.trim().parse().ok().map(Self::Ms);
+        }
+        spec.strip_suffix('f')
+            .and_then(|n| n.trim().parse().ok())
+            .map(Self::Frames)
+    }
+
+    fn to_ms(self, fps: u32) -> Result<u32, RecipeError> {
+        let ms = match self {
+            Self::Ms(ms) => u64::from(ms),
+            Self::Frames(n) => (u64::from(n) * 1000 + u64::from(fps) / 2) / u64::from(fps.max(1)),
+        };
+        if !(10..=65_535).contains(&ms) {
+            return Err(RecipeError::Validation {
+                field: "timings",
+                reason: format!("frame times must be 10..=65535 ms (got {ms} ms)"),
+            });
+        }
+        Ok(ms as u32)
+    }
+}
+
+/// Split a `frame.png:4200ms` / `frame.png:84f` input into its path and display time. A path
+/// that exists as written is never split.
+fn split_timed_input(input: &Path) -> (PathBuf, Option<FrameTime>) {
+    if !input.exists()
+        && let Some(text) = input.to_str()
+        && let Some((file, spec)) = text.rsplit_once(':')
+        && let Some(time) = FrameTime::parse(spec)
+    {
+        return (PathBuf::from(file), Some(time));
+    }
+    (input.to_path_buf(), None)
+}
+
+/// Read a `--timings` JSON list of frame times.
+fn read_timings(path: &Path) -> Result<Vec<FrameTime>, RecipeError> {
+    let invalid = |reason: String| RecipeError::Validation {
+        field: "timings",
+        reason,
+    };
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| invalid(format!("reading '{}': {e}", path.display())))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| invalid(format!("'{}': {e}", path.display())))?;
+    let list = value.as_array().ok_or_else(|| {
+        invalid("expected a JSON list such as [4200, 50, \"100ms\", \"1f\"]".into())
+    })?;
+    list.iter()
+        .map(|entry| {
+            let time = match entry {
+                serde_json::Value::Number(n) => n
+                    .as_u64()
+                    .and_then(|ms| u32::try_from(ms).ok())
+                    .map(FrameTime::Ms),
+                serde_json::Value::String(s) => FrameTime::parse(s),
+                _ => None,
+            };
+            time.ok_or_else(|| {
+                invalid(format!(
+                    "unreadable frame time {entry} (use milliseconds, \"4200ms\" or \"84f\")"
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Delays from `--timings`, which must name exactly one time per frame.
+fn timings_for(
+    timings: &[FrameTime],
+    frame_count: usize,
+    fps: u32,
+) -> Result<Vec<u32>, RecipeError> {
+    if timings.len() != frame_count {
+        return Err(RecipeError::Validation {
+            field: "timings",
+            reason: format!(
+                "lists {} frame times but the animation has {frame_count} frames",
+                timings.len()
+            ),
+        });
+    }
+    timings.iter().map(|t| t.to_ms(fps)).collect()
+}
+
+/// Describe GIF delay rounding, or `None` when every delay is stored exactly.
+fn gif_timing_note(delays: &[u32]) -> Option<String> {
+    let rounded: Vec<(usize, u32, u32)> = delays
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| (i, d, u32::from(gif_delay_centis(d)) * 10))
+        .filter(|&(_, d, stored)| d != stored)
+        .collect();
+    let &(i, d, stored) = rounded.first()?;
+    Some(format!(
+        "GIF stores frame delays in 10 ms steps (20 ms minimum), so it rounded {} of {} delays (first: frame {i}, {d} ms -> {stored} ms); use .apng for exact timing",
+        rounded.len(),
+        delays.len()
+    ))
+}
+
+fn frame_entries(delays: &[u32], changed: Option<&[u64]>, gif: bool) -> Vec<FrameEntry> {
+    delays
+        .iter()
+        .enumerate()
+        .map(|(index, &delay_ms)| FrameEntry {
+            index,
+            delay_ms,
+            encoded_delay_ms: gif.then(|| u32::from(gif_delay_centis(delay_ms)) * 10),
+            changed_pixels: changed.map(|c| c[index]),
+        })
+        .collect()
+}
+
 enum AnimateSource {
     Procedural(Pattern),
     Gif(PathBuf),
     StaticBoil(PathBuf),
-    Sequence(Vec<PathBuf>),
+    Sequence(Vec<(PathBuf, Option<FrameTime>)>),
 }
 
 fn resolve_animate_source(args: &AnimateArgs) -> AnimateSource {
@@ -277,7 +427,8 @@ fn resolve_animate_source(args: &AnimateArgs) -> AnimateSource {
     if args.inputs.is_empty() {
         return AnimateSource::Procedural(Pattern::Sphere);
     }
-    if args.inputs.len() == 1 {
+    let timed: Vec<_> = args.inputs.iter().map(|p| split_timed_input(p)).collect();
+    if args.inputs.len() == 1 && timed[0].1.is_none() {
         let first = &args.inputs[0];
         if !first.exists()
             && let Some(name) = first.to_str()
@@ -294,7 +445,7 @@ fn resolve_animate_source(args: &AnimateArgs) -> AnimateSource {
         }
         return AnimateSource::StaticBoil(first.clone());
     }
-    AnimateSource::Sequence(args.inputs.clone())
+    AnimateSource::Sequence(timed)
 }
 
 pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
@@ -412,6 +563,19 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         AnimateSource::Gif(p) | AnimateSource::StaticBoil(p) => p.display().to_string(),
         AnimateSource::Sequence(list) => format!("sequence({} files)", list.len()),
     };
+    let timings = args.timings.as_deref().map(read_timings).transpose()?;
+    if timings.is_some()
+        && let AnimateSource::Sequence(list) = &source
+        && list.iter().any(|(_, t)| t.is_some())
+    {
+        return Err(RecipeError::Validation {
+            field: "timings",
+            reason: "set frame times either with --timings or with file:4200ms inputs, not both"
+                .to_string(),
+        }
+        .into());
+    }
+    let is_gif = anim_format == AnimFormat::Gif;
 
     if args.dry_run {
         let palette_colors = recipe.validate_static_palette()?;
@@ -432,17 +596,27 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
                 (w, h, requested_frames)
             }
             AnimateSource::Sequence(list) => {
-                let (w, h) = dith_core::input::image_dimensions(&list[0])?;
+                let (w, h) = dith_core::input::image_dimensions(&list[0].0)?;
                 (w, h, list.len())
             }
         };
         let (out_w, out_h) = plan_dimensions(src_w, src_h, &recipe.preprocess);
-        let mut total_frames = if args.ping_pong && planned_frames > 2 {
-            planned_frames * 2 - 2
-        } else {
-            planned_frames
+        let mut delays = match (&timings, &source) {
+            (Some(t), _) => timings_for(t, planned_frames, fps)?,
+            (None, AnimateSource::Sequence(list)) => list
+                .iter()
+                .map(|(_, t)| t.map_or(Ok(default_delay_ms(fps)), |t| t.to_ms(fps)))
+                .collect::<Result<_, _>>()?,
+            (None, _) => vec![default_delay_ms(fps); planned_frames],
         };
-        total_frames += args.hold_start + args.hold_end;
+        if args.reverse {
+            delays.reverse();
+        }
+        if args.ping_pong {
+            apply_ping_pong(&mut delays);
+        }
+        apply_holds(&mut delays, args.hold_start, args.hold_end);
+        let total_frames = delays.len();
         let report = AnimateReport {
             status: "ok",
             dry_run: true,
@@ -453,7 +627,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
             temporal: temporal.id(),
             frame_count: total_frames,
             fps,
-            total_duration_ms: (total_frames as u64) * u64::from((1000 / fps).max(16)),
+            total_duration_ms: delays.iter().map(|&d| u64::from(d)).sum(),
             loops: args.loops,
             preset: recipe.preset.clone(),
             algorithm: recipe.dither.algorithm.id(),
@@ -468,6 +642,9 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
             bytes_written: 0,
             elapsed_ms: 0,
             color_usage: Vec::new(),
+            frames: frame_entries(&delays, None, is_gif),
+            changed_pixels_total: None,
+            timing_note: is_gif.then(|| gif_timing_note(&delays)).flatten(),
             saved_preset_path: None,
             recipe: Some(recipe),
         };
@@ -507,6 +684,12 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
     };
 
     let mut raw_frames = load_source_frames(source, args, &mut recipe, requested_frames, fps)?;
+    if let Some(t) = &timings {
+        let delays = timings_for(t, raw_frames.len(), fps)?;
+        for (frame, delay_ms) in raw_frames.iter_mut().zip(delays) {
+            frame.delay_ms = delay_ms;
+        }
+    }
 
     if args.ping_pong {
         apply_ping_pong(&mut raw_frames);
@@ -589,7 +772,8 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         size_fit_scale = Some(((scale * 1000.0).round() / 1000.0) as f32);
     }
 
-    let total_duration_ms: u64 = anim.frames.iter().map(|f| u64::from(f.delay_ms)).sum();
+    let delays: Vec<u32> = anim.frames.iter().map(|f| f.delay_ms).collect();
+    let total_duration_ms: u64 = delays.iter().map(|&d| u64::from(d)).sum();
     let effective_fps = if total_duration_ms > 0 {
         ((anim.frames.len() as f64 * 1000.0) / total_duration_ms as f64)
             .round()
@@ -640,6 +824,9 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         bytes_written,
         elapsed_ms: anim.elapsed_ms,
         color_usage: anim.histogram,
+        frames: frame_entries(&delays, Some(&anim.changed_pixels), is_gif),
+        changed_pixels_total: Some(anim.changed_pixels.iter().sum()),
+        timing_note: is_gif.then(|| gif_timing_note(&delays)).flatten(),
         saved_preset_path,
         recipe: args.emit_recipe.then_some(recipe.clone()),
     };
@@ -698,7 +885,7 @@ fn load_source_frames(
     requested_frames: usize,
     fps: u32,
 ) -> Result<Vec<AnimFrame>> {
-    let delay_ms = (1000 / fps).max(16);
+    let delay_ms = default_delay_ms(fps);
     Ok(match source {
         AnimateSource::Procedural(pattern) => {
             let stops = if let Some(spec) = &args.stops {
@@ -764,11 +951,11 @@ fn load_source_frames(
         AnimateSource::Sequence(paths) => {
             let mut loaded = paths
                 .iter()
-                .map(|p| {
+                .map(|(p, time)| {
                     let img = load_input_image(p, Some(&recipe.preprocess))?;
                     Ok(AnimFrame {
                         image: img,
-                        delay_ms,
+                        delay_ms: time.map_or(Ok(delay_ms), |t| t.to_ms(fps))?,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -778,6 +965,12 @@ fn load_source_frames(
             loaded
         }
     })
+}
+
+/// Delay of one frame at `fps` (at least 16 ms, the fastest browsers play).
+const fn default_delay_ms(fps: u32) -> u32 {
+    let ms = 1000 / if fps == 0 { 1 } else { fps };
+    if ms < 16 { 16 } else { ms }
 }
 
 /// Parse a human byte size such as `2MB`, `500KB`, `1.5MiB`, or `750000` (decimal units are 1000-based).
@@ -831,6 +1024,9 @@ fn print_animate_summary(report: &AnimateReport) {
         report.temporal,
         report.elapsed_ms,
     );
+    if let Some(note) = &report.timing_note {
+        println!("note: {note}");
+    }
 }
 
 #[cfg(test)]
