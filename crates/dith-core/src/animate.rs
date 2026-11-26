@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
@@ -1350,6 +1350,9 @@ impl GifCanvas<'_> {
 ///
 /// All frames share one compact [`PngLayout`] (an indexed palette for dithered output), and every
 /// frame after the first only stores the bounding box of pixels that changed since the previous one.
+/// When every changed pixel in that box is opaque, the frame may instead be blended over the canvas
+/// with its unchanged pixels fully transparent, so static areas inside the box compress to almost
+/// nothing; see [`blend_unchanged_over`] for how that is chosen.
 /// With `optimize`, every frame is re-filtered and compressed with Zopfli for the smallest file.
 ///
 /// # Errors
@@ -1372,7 +1375,26 @@ pub fn encode_apng(frames: &[AnimFrame], loops: u32, optimize: bool) -> Result<V
             i + 1
         );
     }
-    let layout = PngLayout::for_images(frames.iter().map(|f| &f.image));
+    let mut stored: Vec<ApngFrame> = (0..frames.len())
+        .into_par_iter()
+        .map(|i| {
+            let cur = &frames[i].image;
+            let (x, y, rw, rh) = i
+                .checked_sub(1)
+                .map_or((0, 0, w, h), |p| changed_region(&frames[p].image, cur));
+            ApngFrame {
+                x,
+                y,
+                pixels: image::imageops::crop_imm(cur, x, y, rw, rh).to_image(),
+                blend: png::BlendOp::Source,
+            }
+        })
+        .collect();
+    let layout = blend_unchanged_over(
+        PngLayout::for_images(frames.iter().map(|f| &f.image)),
+        frames,
+        &mut stored,
+    );
 
     let mut out = Vec::new();
     {
@@ -1391,29 +1413,25 @@ pub fn encode_apng(frames: &[AnimFrame], loops: u32, optimize: bool) -> Result<V
         encoder
             .set_dispose_op(png::DisposeOp::None)
             .context("setting APNG dispose op")?;
-        encoder
-            .set_blend_op(png::BlendOp::Source)
-            .context("setting APNG blend op")?;
 
         let mut writer = encoder.write_header().context("writing APNG header")?;
-        let mut prev: Option<&RgbaImage> = None;
-        for frame in frames {
+        for (frame, part) in frames.iter().zip(&stored) {
             let delay_ms =
                 u16::try_from(frame.delay_ms.clamp(10, u32::from(u16::MAX))).unwrap_or(u16::MAX);
             writer
                 .set_frame_delay(delay_ms, 1000)
                 .context("setting APNG frame delay")?;
-            let (x, y, rw, rh) = prev.map_or((0, 0, w, h), |p| changed_region(p, &frame.image));
             writer
                 .reset_frame_position()
-                .and_then(|()| writer.set_frame_dimension(rw, rh))
-                .and_then(|()| writer.set_frame_position(x, y))
+                .and_then(|()| {
+                    writer.set_frame_dimension(part.pixels.width(), part.pixels.height())
+                })
+                .and_then(|()| writer.set_frame_position(part.x, part.y))
+                .and_then(|()| writer.set_blend_op(part.blend))
                 .context("setting APNG frame region")?;
-            let region = image::imageops::crop_imm(&frame.image, x, y, rw, rh).to_image();
             writer
-                .write_image_data(&layout.pixel_data(&region))
+                .write_image_data(&layout.pixel_data(&part.pixels))
                 .context("writing APNG frame pixels")?;
-            prev = Some(&frame.image);
         }
         writer.finish().context("finalizing APNG stream")?;
     }
@@ -1422,6 +1440,133 @@ pub fn encode_apng(frames: &[AnimFrame], loops: u32, optimize: bool) -> Result<V
     } else {
         Ok(out)
     }
+}
+
+/// Over blending is used only where its trial size is below this many 1024ths of the Source
+/// frame's (and a new transparent palette entry only when the whole animation's trial total is),
+/// since the fast trial compression misjudges small differences: at 1024, one boiling 8-color
+/// test animation chose Over on its trials and grew 5.5% at full compression.
+const APNG_OVER_MARGIN: usize = 819;
+
+/// One stored APNG frame: the pixels of a canvas region and how they are blended onto it.
+#[derive(Debug)]
+struct ApngFrame {
+    x: u32,
+    y: u32,
+    pixels: RgbaImage,
+    blend: png::BlendOp,
+}
+
+/// Switch delta frames to Over blending with their unchanged pixels fully transparent wherever a
+/// fast trial compression says that is clearly smaller, and return the layout to encode with
+/// (`plain` unless a transparent palette entry had to be added). Over is exact only where the new
+/// pixel is opaque or the canvas already shows it, so frames that change a pixel to a translucent
+/// one stay Source. Frames with too few unchanged pixels to reach the margin skip the trials, and
+/// when Over wins on neither of the two largest delta frames no other frame is tried. An
+/// indexed palette without a transparent entry gets one, which can raise the bit depth of every
+/// frame, so it is only kept when the trial total of the whole animation passes the same margin.
+fn blend_unchanged_over(
+    plain: PngLayout,
+    frames: &[AnimFrame],
+    stored: &mut [ApngFrame],
+) -> PngLayout {
+    let PngLayout::Indexed(palette) = &plain else {
+        return plain;
+    };
+    let existing = palette.iter().copied().find(|c| c[3] == 0);
+    if existing.is_none() && palette.len() == 256 {
+        return plain;
+    }
+    let clear = existing.unwrap_or([0; 4]);
+    let extended = existing.is_none().then(|| {
+        let mut colors = palette.clone();
+        colors.insert(colors.iter().take_while(|c| c[3] < 255).count(), clear);
+        PngLayout::Indexed(colors)
+    });
+    let layout = extended.as_ref().unwrap_or(&plain);
+
+    let trial = |i: usize| {
+        let part = &stored[i];
+        let Some(canvas) = i.checked_sub(1).map(|p| &frames[p].image) else {
+            return ApngTrial::default();
+        };
+        let mut over = part.pixels.clone();
+        let row_bytes = over.width() as usize * 4;
+        let canvas_stride = canvas.width() as usize * 4;
+        let mut unchanged = 0;
+        for (y, row) in over.chunks_exact_mut(row_bytes).enumerate() {
+            let start = (part.y as usize + y) * canvas_stride + part.x as usize * 4;
+            let canvas_row = &canvas.as_raw()[start..start + row_bytes];
+            let (shown, _) = canvas_row.as_chunks::<4>();
+            for (px, shown) in row.as_chunks_mut::<4>().0.iter_mut().zip(shown) {
+                if px == shown {
+                    *px = clear;
+                    unchanged += 1;
+                } else if px[3] != 255 {
+                    return ApngTrial::default();
+                }
+            }
+        }
+        if unchanged * 4 * 1024 < over.len() * (1024 - APNG_OVER_MARGIN) {
+            return ApngTrial::default();
+        }
+        let source = trial_size(layout, &part.pixels);
+        let size = trial_size(layout, &over);
+        ApngTrial {
+            source: Some(source),
+            over: (size * 1024 < source * APNG_OVER_MARGIN).then_some((size, over)),
+        }
+    };
+    let mut probes: Vec<usize> = (1..stored.len()).collect();
+    probes.sort_by_key(|&i| std::cmp::Reverse(stored[i].pixels.len()));
+    probes.truncate(2);
+    if probes.par_iter().all(|&i| trial(i).over.is_none()) {
+        return plain;
+    }
+    let trials: Vec<ApngTrial> = (0..stored.len()).into_par_iter().map(&trial).collect();
+    if trials.iter().all(|t| t.over.is_none()) {
+        return plain;
+    }
+    if extended.is_some() {
+        let (total, plain_total) = stored
+            .par_iter()
+            .zip(&trials)
+            .map(|(part, t)| {
+                let stored_size = t.over.as_ref().map_or_else(
+                    || t.source.unwrap_or_else(|| trial_size(layout, &part.pixels)),
+                    |o| o.0,
+                );
+                (stored_size, trial_size(&plain, &part.pixels))
+            })
+            .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+        if total * 1024 >= plain_total * APNG_OVER_MARGIN {
+            return plain;
+        }
+    }
+    for (part, trial) in stored.iter_mut().zip(trials) {
+        if let Some((_, pixels)) = trial.over {
+            part.pixels = pixels;
+            part.blend = png::BlendOp::Over;
+        }
+    }
+    extended.unwrap_or(plain)
+}
+
+/// Trial sizes of one delta APNG frame whose unchanged pixels could be blended over the canvas:
+/// stored as it is, and blended with its unchanged pixels transparent when that is clearly smaller.
+#[derive(Debug, Default)]
+struct ApngTrial {
+    source: Option<usize>,
+    over: Option<(usize, RgbaImage)>,
+}
+
+/// Size of `img` in `layout` after a fast DEFLATE pass, as a cheap stand-in for its final size.
+fn trial_size(layout: &PngLayout, img: &RgbaImage) -> usize {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder
+        .write_all(&layout.pixel_data(img))
+        .and_then(|()| encoder.finish())
+        .map_or(usize::MAX, |out| out.len())
 }
 
 /// Bounding box `(x, y, width, height)` of pixels that differ between two equally sized frames
@@ -1792,6 +1937,43 @@ mod tests {
                 assert_eq!(px, fixed.frames[0].image.get_pixel(x, y));
             }
         }
+    }
+
+    #[test]
+    fn apng_blends_static_noise_over_the_canvas() {
+        let mut state = 0x9e37_79b9_u32;
+        let background = RgbaImage::from_fn(96, 64, |_, _| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            if state.is_multiple_of(2) {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        });
+        let frames: Vec<AnimFrame> = (0..8u32)
+            .map(|i| {
+                let mut image = background.clone();
+                for (x, y) in [(i * 10, 2), (90 - i * 10, 60)] {
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        image.put_pixel(x + dx, y + dy, Rgba([255, 0, 0, 255]));
+                    }
+                }
+                AnimFrame {
+                    image,
+                    delay_ms: 80,
+                }
+            })
+            .collect();
+        assert_apng_roundtrips_exactly(&frames);
+        let bytes = encode_apng(&frames, 0, false).unwrap();
+        let over_frames = bytes
+            .windows(4)
+            .enumerate()
+            .filter(|&(i, w)| w == b"fcTL" && bytes[i + 4 + 25] == 1)
+            .count();
+        assert!(over_frames > 0, "no frame was blended over the canvas");
     }
 
     #[test]
