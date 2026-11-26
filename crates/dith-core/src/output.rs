@@ -52,7 +52,7 @@ pub enum OutputFormat {
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum SvgShape {
-    /// Horizontal run-length merged crisp pixel rectangles (smallest file size).
+    /// Horizontal run-length merged crisp pixel runs, layered by color (smallest file size).
     #[default]
     Rect,
     /// Circular stipple/halftone dots per non-background pixel.
@@ -330,40 +330,50 @@ pub fn write_output_file(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::write(path, bytes).with_context(|| format!("writing output file '{}'", path.display()))
 }
 
+/// Paint class of pixels no SVG run may cover: transparent holes and the background color.
+const SVG_BARRIER: u32 = u32::MAX;
+
 /// Render a dithered image as a compact, crisp SVG.
 ///
-/// `Rect` mode strokes each horizontal run as a 1px-wide line through the row centre, one
-/// `<path>` per color; dot modes trace every dot as two filled semicircle arcs in one `<path>`
-/// per color. Colors use the shortest hex form, so files stay lean for web and design tooling.
+/// `Rect` mode strokes horizontal pixel runs as 1px-wide lines through the row centres, one
+/// `<path>` per color. Opaque colors are painted most frequent first and a run may pass under
+/// pixels a later color repaints, so runs merge.
+/// Dot modes trace every dot as two filled semicircle arcs in one `<path>` per color. Colors use
+/// the shortest hex form, so files stay lean for web and design tooling.
 #[must_use]
 pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
-    let w = img.width();
-    let h = img.height();
+    let (w, h) = img.dimensions();
+    let IndexedColors {
+        colors,
+        counts,
+        indices,
+    } = index_colors(img);
 
-    // Identify dominant opaque color for optional background rect or skip-bg omission.
     let bg_color: Option<[u8; 3]> = {
-        let mut counts: BTreeMap<[u8; 3], u64> = BTreeMap::new();
-        let mut has_transparency = false;
-        for px in img.pixels() {
-            if px[3] < 255 {
-                has_transparency = true;
-            }
-            if px[3] > 0 {
-                *counts.entry([px[0], px[1], px[2]]).or_insert(0) += 1;
+        let mut by_rgb: BTreeMap<[u8; 3], u64> = BTreeMap::new();
+        for (c, &count) in colors.iter().zip(&counts) {
+            if c[3] > 0 {
+                *by_rgb.entry([c[0], c[1], c[2]]).or_insert(0) += count;
             }
         }
-        if has_transparency && !skip_bg {
+        if colors.iter().any(|c| c[3] < 255) && !skip_bg {
             None
         } else {
-            counts
+            by_rgb
                 .into_iter()
                 .max_by_key(|&(_, c)| c)
                 .map(|(rgb, _)| rgb)
         }
     };
+    let skipped = |c: &[u8; 4]| c[3] == 0 || bg_color == Some([c[0], c[1], c[2]]);
 
-    let mut out = String::with_capacity((w * h) as usize * 4);
-    let _ = writeln!(
+    let body = match shape {
+        SvgShape::Rect => svg_runs(w, &colors, &counts, indices, skipped),
+        SvgShape::Circle | SvgShape::Dot => svg_dots(w, shape, &colors, &indices, skipped),
+    };
+
+    let mut out = String::with_capacity(body.len() + 256);
+    let _ = write!(
         out,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\" shape-rendering=\"{}\">",
         if shape == SvgShape::Rect {
@@ -372,95 +382,302 @@ pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
             "geometricPrecision"
         }
     );
-
     if let Some(bg) = bg_color
         && !skip_bg
     {
-        let _ = writeln!(
+        let _ = write!(
             out,
             "<rect width=\"{w}\" height=\"{h}\" fill=\"{}\"/>",
             svg_hex(bg)
         );
     }
-
-    match shape {
-        SvgShape::Rect => {
-            let mut paths: BTreeMap<[u8; 4], (String, u32, u32)> = BTreeMap::new();
-            for y in 0..h {
-                let mut x = 0u32;
-                while x < w {
-                    let px = *img.get_pixel(x, y);
-                    if px[3] == 0 || bg_color == Some([px[0], px[1], px[2]]) {
-                        x += 1;
-                        continue;
-                    }
-                    let start_x = x;
-                    x += 1;
-                    while x < w && *img.get_pixel(x, y) == px {
-                        x += 1;
-                    }
-                    let run_w = x - start_x;
-                    let (d, end_x, last_y) = paths.entry(px.0).or_default();
-                    if d.is_empty() {
-                        let _ = write!(d, "M{start_x} {y}.5h{run_w}");
-                    } else {
-                        let dx = i64::from(start_x) - i64::from(*end_x);
-                        let dy = y - *last_y;
-                        let _ = write!(d, "m{dx} {dy}h{run_w}");
-                    }
-                    (*end_x, *last_y) = (x, y);
-                }
-            }
-            if !paths.is_empty() {
-                out.push_str("<g fill=\"none\">\n");
-                for (rgba, (d, _, _)) in paths {
-                    let _ = write!(
-                        out,
-                        "<path stroke=\"{}\"",
-                        svg_hex([rgba[0], rgba[1], rgba[2]])
-                    );
-                    if rgba[3] < 255 {
-                        let _ =
-                            write!(out, " stroke-opacity=\"{:.2}\"", f32::from(rgba[3]) / 255.0);
-                    }
-                    let _ = writeln!(out, " d=\"{d}\"/>");
-                }
-                out.push_str("</g>\n");
-            }
-        }
-        SvgShape::Circle | SvgShape::Dot => {
-            let (left, arcs) = if shape == SvgShape::Circle {
-                (".02", "a.48.48 0 1 0 .96 0 .48.48 0 1 0-.96 0")
-            } else {
-                (".12", "a.38.38 0 1 0 .76 0 .38.38 0 1 0-.76 0")
-            };
-            let mut dots: BTreeMap<[u8; 3], (String, u32, u32)> = BTreeMap::new();
-            for y in 0..h {
-                for x in 0..w {
-                    let px = *img.get_pixel(x, y);
-                    let rgb = [px[0], px[1], px[2]];
-                    if px[3] == 0 || bg_color == Some(rgb) {
-                        continue;
-                    }
-                    let (d, last_x, last_y) = dots.entry(rgb).or_default();
-                    if d.is_empty() {
-                        let _ = write!(d, "M{x}{left} {y}.5{arcs}");
-                    } else {
-                        let dx = i64::from(x) - i64::from(*last_x);
-                        let dy = y - *last_y;
-                        let _ = write!(d, "m{dx} {dy}{arcs}");
-                    }
-                    (*last_x, *last_y) = (x, y);
-                }
-            }
-            for (rgb, (d, _, _)) in dots {
-                let _ = writeln!(out, "<path fill=\"{}\" d=\"{d}\"/>", svg_hex(rgb));
-            }
-        }
-    }
-
+    out.push_str(&body);
     out.push_str("</svg>\n");
     out
+}
+
+/// Distinct RGBA colors of an image in first-seen order, their pixel counts, and each pixel's
+/// index into that list.
+struct IndexedColors {
+    colors: Vec<[u8; 4]>,
+    counts: Vec<u64>,
+    indices: Vec<u32>,
+}
+
+fn index_colors(img: &RgbaImage) -> IndexedColors {
+    const fn slot_of(key: u32, bits: u32) -> usize {
+        (key.wrapping_mul(0x9E37_79B1) >> (32 - bits)) as usize
+    }
+
+    let (pixels, _) = img.as_raw().as_chunks::<4>();
+    let mut colors: Vec<[u8; 4]> = Vec::new();
+    let mut counts: Vec<u64> = Vec::new();
+    let mut indices = Vec::with_capacity(pixels.len());
+    let mut bits = 10;
+    let mut slots: Vec<(u32, u32)> = vec![(0, 0); 1 << bits];
+    let mut last = (0u32, u32::MAX);
+    for &px in pixels {
+        let key = u32::from_le_bytes(px);
+        if last.0 != key || last.1 == u32::MAX {
+            let mut slot = slot_of(key, bits);
+            while slots[slot].1 != 0 && slots[slot].0 != key {
+                slot = (slot + 1) & (slots.len() - 1);
+            }
+            if slots[slot].1 == 0 {
+                colors.push(px);
+                counts.push(0);
+                slots[slot] = (key, colors.len() as u32);
+                if colors.len() * 2 > slots.len() {
+                    bits += 1;
+                    slots = vec![(0, 0); 1 << bits];
+                    for (c, index) in colors.iter().zip(1u32..) {
+                        let key = u32::from_le_bytes(*c);
+                        let mut slot = slot_of(key, bits);
+                        while slots[slot].1 != 0 {
+                            slot = (slot + 1) & (slots.len() - 1);
+                        }
+                        slots[slot] = (key, index);
+                    }
+                }
+                last = (key, colors.len() as u32 - 1);
+            } else {
+                last = (key, slots[slot].1 - 1);
+            }
+        }
+        counts[last.1 as usize] += 1;
+        indices.push(last.1);
+    }
+    IndexedColors {
+        colors,
+        counts,
+        indices,
+    }
+}
+
+/// Stroke every pixel run of a `Rect` SVG, returning the `<g>` element (empty when nothing is drawn).
+///
+/// Opaque colors become layers ordered by descending pixel count; translucent colors follow and
+/// keep their exact coverage. `skipped` marks colors that are never painted.
+fn svg_runs(
+    w: u32,
+    colors: &[[u8; 4]],
+    counts: &[u64],
+    mut codes: Vec<u32>,
+    skipped: impl Fn(&[u8; 4]) -> bool,
+) -> String {
+    let painted = |opaque: bool| {
+        let mut layer: Vec<usize> = (0..colors.len())
+            .filter(|&i| !skipped(&colors[i]) && (colors[i][3] == 255) == opaque)
+            .collect();
+        layer.sort_by_key(|&i| {
+            (
+                std::cmp::Reverse(if opaque { counts[i] } else { 0 }),
+                colors[i],
+            )
+        });
+        layer
+    };
+    let mut layers = painted(true);
+    let opaque = layers.len() as u32;
+    layers.extend(painted(false));
+    if layers.is_empty() {
+        return String::new();
+    }
+    let mut code_of = vec![SVG_BARRIER; colors.len()];
+    for (&i, code) in layers.iter().zip(0u32..) {
+        code_of[i] = code;
+    }
+    for code in &mut codes {
+        *code = code_of[*code as usize];
+    }
+
+    let paths = trace_runs(&codes, w as usize, opaque, layers.len());
+
+    let mut out = String::from("<g fill=\"none\">");
+    for (path, &i) in paths.iter().zip(&layers) {
+        let rgba = colors[i];
+        let mut stroke = format!("stroke=\"{}\"", svg_hex([rgba[0], rgba[1], rgba[2]]));
+        if rgba[3] < 255 {
+            let opacity = format!("{:.2}", f32::from(rgba[3]) / 255.0);
+            let opacity = opacity.trim_end_matches('0').trim_end_matches('.');
+            let opacity = match opacity.strip_prefix("0.") {
+                Some(fraction) => format!(".{fraction}"),
+                None => opacity.to_string(),
+            };
+            let _ = write!(stroke, " stroke-opacity=\"{opacity}\"");
+        }
+        let _ = write!(out, "<path {stroke} d=\"{}\"/>", path.d);
+    }
+    out.push_str("</g>");
+    out
+}
+
+/// Trace the stroked runs of every layer along rows.
+///
+/// `codes` holds one paint class per pixel: a layer index, or [`SVG_BARRIER`]. Layers below
+/// `opaque` may run under pixels of any later opaque layer; the rest cover their own pixels only.
+fn trace_runs(codes: &[u32], width: usize, opaque: u32, layers: usize) -> Vec<RunPath> {
+    let mut out: Vec<RunPath> = (0..layers).map(|_| RunPath::default()).collect();
+    let mut stack: Vec<(u32, u32, u32)> = Vec::new();
+    for (row, line) in codes.chunks(width.max(1)).zip(0u32..) {
+        let mut close = |(code, start, end): (u32, u32, u32)| {
+            out[code as usize].push(line, start, end - start);
+        };
+        let mut previous = SVG_BARRIER;
+        for (&code, end) in row.iter().zip(1u32..) {
+            if code == previous {
+                if let Some(top) = stack.last_mut() {
+                    top.2 = end;
+                }
+                continue;
+            }
+            previous = code;
+            while let Some(&top) = stack.last()
+                && (top.0 > code || (code >= opaque && top.0 != code))
+            {
+                close(top);
+                stack.pop();
+            }
+            match stack.last_mut() {
+                Some(top) if top.0 == code => top.2 = end,
+                _ if code != SVG_BARRIER => stack.push((code, end - 1, end)),
+                _ => {}
+            }
+        }
+        while let Some(top) = stack.pop() {
+            close(top);
+        }
+    }
+    out
+}
+
+/// Path data for 1px-wide horizontally stroked runs, with the pen position after the last run.
+#[derive(Default)]
+struct RunPath {
+    d: String,
+    along: u32,
+    line: u32,
+}
+
+impl RunPath {
+    /// Append a run of `length` pixels starting `start` pixels into row `line`, moving there with
+    /// whichever of an absolute or a relative move is shorter.
+    fn push(&mut self, line: u32, start: u32, length: u32) {
+        let d_along = i64::from(start) - i64::from(self.along);
+        let d_line = i64::from(line) - i64::from(self.line);
+        let absolute = 4
+            + decimal_len(i64::from(start))
+            + if line == 0 {
+                0
+            } else {
+                decimal_len(i64::from(line))
+            };
+        let relative = 2 + decimal_len(d_along) + decimal_len(d_line);
+        let d = &mut self.d;
+        if d.is_empty() || absolute < relative {
+            d.push('M');
+            push_decimal(d, i64::from(start));
+            d.push(' ');
+            if line > 0 {
+                push_decimal(d, i64::from(line));
+            }
+            d.push_str(".5");
+        } else {
+            d.push('m');
+            push_decimal(d, d_along);
+            d.push(' ');
+            push_decimal(d, d_line);
+        }
+        d.push('h');
+        push_decimal(d, i64::from(length));
+        self.along = start + length;
+        self.line = line;
+    }
+}
+
+/// Trace every dot of a `Circle` or `Dot` SVG as two filled semicircle arcs, one `<path>` per
+/// color (alpha is ignored, as dots are always opaque).
+fn svg_dots(
+    w: u32,
+    shape: SvgShape,
+    colors: &[[u8; 4]],
+    indices: &[u32],
+    skipped: impl Fn(&[u8; 4]) -> bool,
+) -> String {
+    let (left, arcs) = if shape == SvgShape::Circle {
+        (".02", "a.48.48 0 1 0 .96 0 .48.48 0 1 0-.96 0")
+    } else {
+        (".12", "a.38.38 0 1 0 .76 0 .38.38 0 1 0-.76 0")
+    };
+    let mut by_rgb: BTreeMap<[u8; 3], usize> = BTreeMap::new();
+    for c in colors.iter().filter(|c| !skipped(c)) {
+        let next = by_rgb.len();
+        by_rgb.entry([c[0], c[1], c[2]]).or_insert(next);
+    }
+    let path_of: Vec<usize> = colors
+        .iter()
+        .map(|c| {
+            let path = by_rgb.get(&[c[0], c[1], c[2]]).filter(|_| !skipped(c));
+            path.copied().unwrap_or(usize::MAX)
+        })
+        .collect();
+    let mut dots: Vec<(String, u32, u32)> = vec![Default::default(); by_rgb.len()];
+    for (row, y) in indices.chunks(w.max(1) as usize).zip(0u32..) {
+        for (&index, x) in row.iter().zip(0u32..) {
+            let Some((d, last_x, last_y)) = dots.get_mut(path_of[index as usize]) else {
+                continue;
+            };
+            if d.is_empty() {
+                d.push('M');
+                push_decimal(d, i64::from(x));
+                d.push_str(left);
+                d.push(' ');
+                if y > 0 {
+                    push_decimal(d, i64::from(y));
+                }
+                d.push_str(".5");
+            } else {
+                d.push('m');
+                push_decimal(d, i64::from(x) - i64::from(*last_x));
+                d.push(' ');
+                push_decimal(d, i64::from(y - *last_y));
+            }
+            d.push_str(arcs);
+            (*last_x, *last_y) = (x, y);
+        }
+    }
+    let mut out = String::with_capacity(dots.iter().map(|(d, _, _)| d.len() + 32).sum());
+    for (rgb, i) in by_rgb {
+        let _ = write!(out, "<path fill=\"{}\" d=\"{}\"/>", svg_hex(rgb), dots[i].0);
+    }
+    out
+}
+
+/// Characters [`push_decimal`] writes for `n`.
+fn decimal_len(n: i64) -> usize {
+    let digits = n.unsigned_abs().checked_ilog10().map_or(1, |log| log + 1);
+    usize::from(n < 0) + digits as usize
+}
+
+/// Append `n` in decimal.
+fn push_decimal(out: &mut String, n: i64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut rest = n.unsigned_abs();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        out.push('-');
+    }
+    for &digit in &digits[at..] {
+        out.push(char::from(digit));
+    }
 }
 
 /// Format a color as the shortest SVG hex literal, `#rgb` when every channel repeats its nibble.
@@ -1188,14 +1405,14 @@ mod tests {
             "{svg}"
         );
         assert!(
-            svg.contains("<path stroke=\"#000\" d=\"M2 0.5h4m-5 1h2\"/>"),
+            svg.contains("<path stroke=\"#000\" d=\"M2 .5h4m-5 1h2\"/>"),
             "expected stroked RLE runs: {svg}"
         );
 
         img.put_pixel(7, 1, Rgba([0x12, 0x34, 0x56, 128]));
         let svg = render_svg(&img, SvgShape::Rect, false);
         assert!(
-            svg.contains("<path stroke=\"#123456\" stroke-opacity=\"0.50\" d=\"M7 1.5h1\"/>"),
+            svg.contains("<path stroke=\"#123456\" stroke-opacity=\".5\" d=\"M7 1.5h1\"/>"),
             "expected translucent run: {svg}"
         );
     }
@@ -1211,15 +1428,187 @@ mod tests {
         assert!(!svg.contains("<rect"), "{svg}");
         assert!(
             svg.contains(&format!(
-                "<path fill=\"#abc\" d=\"M1.02 0.5{arcs}m2 0{arcs}m-3 2{arcs}\"/>"
+                "<path fill=\"#abc\" d=\"M1.02 .5{arcs}m2 0{arcs}m-3 2{arcs}\"/>"
             )),
             "expected one arc pair per dot: {svg}"
         );
         let dot = render_svg(&img, SvgShape::Dot, true);
         assert!(
-            dot.contains("d=\"M1.12 0.5a.38.38 0 1 0 .76 0 .38.38 0 1 0-.76 0m2 0a.38"),
+            dot.contains("d=\"M1.12 .5a.38.38 0 1 0 .76 0 .38.38 0 1 0-.76 0m2 0a.38"),
             "{dot}"
         );
+    }
+
+    /// A stroke color and, when translucent, its opacity.
+    type SvgPaint = ([u8; 3], Option<f32>);
+
+    /// Every paint a `Rect` SVG from [`render_svg`] applies to each pixel, in document order: the
+    /// stroke color and its opacity when translucent. Also returns the background rect color.
+    fn paint_svg_runs(svg: &str, w: u32, h: u32) -> (Option<[u8; 3]>, Vec<Vec<SvgPaint>>) {
+        fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+            let start = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+            Some(&tag[start..start + tag[start..].find('"')?])
+        }
+        fn rgb(hex: &str) -> [u8; 3] {
+            let digits: Vec<u8> = hex[1..]
+                .chars()
+                .map(|c| c.to_digit(16).unwrap() as u8)
+                .collect();
+            match digits.len() {
+                3 => [digits[0] * 17, digits[1] * 17, digits[2] * 17],
+                _ => [0, 2, 4].map(|i| digits[i] * 16 + digits[i + 1]),
+            }
+        }
+        let mut painted = vec![Vec::new(); (w * h) as usize];
+        let mut rect = None;
+        let mut groups: Vec<(Option<&str>, Option<&str>)> = vec![(None, None)];
+        for tag in svg.split('<').skip(1) {
+            let (stroke, opacity) = *groups.last().unwrap();
+            let stroke = attr(tag, "stroke").or(stroke);
+            let opacity = attr(tag, "stroke-opacity").or(opacity);
+            if tag.starts_with("rect ") {
+                rect = Some(rgb(attr(tag, "fill").unwrap()));
+            } else if tag.starts_with("g ") {
+                groups.push((stroke, opacity));
+            } else if tag.starts_with("/g") {
+                groups.pop();
+            } else if tag.starts_with("path ") {
+                let paint = (
+                    rgb(stroke.unwrap()),
+                    opacity.map(|o| o.parse::<f32>().unwrap()),
+                );
+                let dash: Option<Vec<u32>> = attr(tag, "stroke-dasharray")
+                    .map(|a| a.split(' ').map(|n| n.parse().unwrap()).collect());
+                let d = attr(tag, "d").unwrap();
+                let mut numbers: Vec<f64> = Vec::new();
+                let (mut x, mut y) = (0.0, 0.0);
+                let mut command = ' ';
+                let mut chars = d.char_indices().peekable();
+                while let Some((at, c)) = chars.next() {
+                    if c.is_ascii_alphabetic() {
+                        command = c;
+                        continue;
+                    }
+                    if c == ' ' {
+                        continue;
+                    }
+                    let mut end = at + 1;
+                    let mut dot = c == '.';
+                    while let Some(&(next_at, next)) = chars.peek()
+                        && (next.is_ascii_digit() || (next == '.' && !dot))
+                    {
+                        dot |= next == '.';
+                        end = next_at + 1;
+                        chars.next();
+                    }
+                    numbers.push(d[at..end].parse().unwrap());
+                    match (command, numbers.as_slice()) {
+                        ('M', &[nx, ny]) => (x, y) = (nx, ny),
+                        ('m', &[dx, dy]) => (x, y) = (x + dx, y + dy),
+                        ('h' | 'v', &[length]) => {
+                            let vertical = command == 'v';
+                            assert_eq!(
+                                (x.fract(), y.fract()),
+                                if vertical { (0.5, 0.0) } else { (0.0, 0.5) }
+                            );
+                            for step in 0..length as u32 {
+                                let on = dash.as_ref().is_none_or(|dash| {
+                                    let (on, off) = (dash[0], *dash.last().unwrap());
+                                    step % (on + off) < on
+                                });
+                                let (cx, cy) = if vertical {
+                                    (x as u32, y as u32 + step)
+                                } else {
+                                    (x as u32 + step, y as u32)
+                                };
+                                if on {
+                                    assert!(cx < w && cy < h, "{cx},{cy} outside {w}x{h}");
+                                    painted[(cy * w + cx) as usize].push(paint);
+                                }
+                            }
+                            if vertical {
+                                y += length;
+                            } else {
+                                x += length;
+                            }
+                        }
+                        _ => continue,
+                    }
+                    numbers.clear();
+                }
+            }
+        }
+        (rect, painted)
+    }
+
+    #[test]
+    fn svg_rect_strokes_reproduce_every_pixel() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut random = move |n: u32| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) % u64::from(n)) as u32
+        };
+        let ink = |i: u32| Rgba([(i * 53) as u8, (255 - i * 31) as u8, (i * 97) as u8, 255]);
+        let noise = RgbaImage::from_fn(61, 37, |_, _| {
+            let i = random(9);
+            ink(if i > 4 { 0 } else { i })
+        });
+        let ordered = RgbaImage::from_fn(96, 64, |x, y| {
+            let i = [0, 2, 3, 1][((x % 4) ^ (y % 2)) as usize];
+            ink(if (x / 24 + y / 16) % 3 == 0 { 0 } else { i })
+        });
+        let columns = RgbaImage::from_fn(48, 70, |x, y| ink(u32::from(x % 3 == 0 && y % 23 != 5)));
+        let mut holes = noise.clone();
+        for (x, y, px) in holes.enumerate_pixels_mut() {
+            match random(7) {
+                0 => px[3] = 0,
+                1 if px[0] != 0 => px[3] = 90 + (x + y) as u8 % 3,
+                _ => {}
+            }
+        }
+
+        for (name, img) in [
+            ("noise", noise),
+            ("ordered", ordered),
+            ("columns", columns),
+            ("holes", holes),
+        ] {
+            for skip_bg in [false, true] {
+                let svg = render_svg(&img, SvgShape::Rect, skip_bg);
+                let (rect, painted) = paint_svg_runs(&svg, img.width(), img.height());
+                let bg = (skip_bg || img.pixels().all(|px| px[3] == 255)).then_some([0, 255, 0]);
+                assert_eq!(rect, bg.filter(|_| !skip_bg), "{name}: {svg}");
+                for ((x, y, px), paints) in img.enumerate_pixels().zip(&painted) {
+                    let rgb = [px[0], px[1], px[2]];
+                    let at = format!("{name} skip_bg={skip_bg} at {x},{y}");
+                    match px[3] {
+                        0 => assert!(paints.is_empty(), "{at}"),
+                        255 if skip_bg && Some(rgb) == bg => assert!(paints.is_empty(), "{at}"),
+                        255 => assert_eq!(
+                            paints.last().map_or(rect, |p| p.1.is_none().then_some(p.0)),
+                            Some(rgb),
+                            "{at}"
+                        ),
+                        alpha => {
+                            assert_eq!(paints.len(), 1, "{at}");
+                            assert_eq!(paints[0].0, rgb, "{at}");
+                            assert!(
+                                (paints[0].1.unwrap() - f32::from(alpha) / 255.0).abs() < 0.006,
+                                "{at}"
+                            );
+                        }
+                    }
+                }
+                if name == "noise" {
+                    assert!(
+                        painted.iter().any(|p| p.len() > 1),
+                        "{name}: no run passes under a later color"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
