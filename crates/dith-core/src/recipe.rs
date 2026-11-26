@@ -1,5 +1,6 @@
 //! Serializable dithering recipes and pipeline execution.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -12,7 +13,7 @@ use crate::color::Rgb;
 use crate::dither::{DitherOptions, dither_image};
 use crate::output::{ColorUsage, ExportOptions, color_histogram};
 use crate::palette::{Palette, PaletteError, builtin_palette_ids, extract_adaptive_palette};
-use crate::preprocess::{PreprocessOptions, finalize_image, prepare_image};
+use crate::preprocess::{PreprocessOptions, finalize_image, prepare};
 use crate::preset::{PresetStoreError, UnknownPresetError, all_preset_ids, resolve_preset};
 
 /// Structured domain error carrying an agent-friendly machine code and recovery hints.
@@ -325,12 +326,28 @@ pub struct PipelineOutput {
 /// # Errors
 /// Returns an error if recipe validation or palette resolution fails.
 pub fn run_pipeline(src: &RgbaImage, recipe: &DitherRecipe) -> Result<PipelineOutput, RecipeError> {
+    pipeline(Cow::Borrowed(src), recipe)
+}
+
+/// [`run_pipeline`] on an image the caller no longer needs: when no resize is planned the
+/// pipeline works in `src`'s buffer instead of a copy. The output is identical.
+///
+/// # Errors
+/// Returns an error if recipe validation or palette resolution fails.
+pub fn run_pipeline_owned(
+    src: RgbaImage,
+    recipe: &DitherRecipe,
+) -> Result<PipelineOutput, RecipeError> {
+    pipeline(Cow::Owned(src), recipe)
+}
+
+fn pipeline(src: Cow<'_, RgbaImage>, recipe: &DitherRecipe) -> Result<PipelineOutput, RecipeError> {
     let started = Instant::now();
     recipe.validate()?;
     let source_width = src.width();
     let source_height = src.height();
 
-    let prepared = prepare_image(src, &recipe.preprocess);
+    let prepared = prepare(src, &recipe.preprocess);
     let working_width = prepared.working.width();
     let working_height = prepared.working.height();
 

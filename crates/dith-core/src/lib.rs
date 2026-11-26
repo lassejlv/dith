@@ -67,4 +67,6 @@ pub use ink::SolidInk;
 pub use output::{ExportOptions, OutputFormat, encode_image};
 pub use palette::{Palette, PaletteError};
 pub use preprocess::PreprocessOptions;
-pub use recipe::{DitherRecipe, PaletteSpec, PipelineOutput, RecipeError, run_pipeline};
+pub use recipe::{
+    DitherRecipe, PaletteSpec, PipelineOutput, RecipeError, run_pipeline, run_pipeline_owned,
+};

@@ -11,7 +11,7 @@ use crate::viewer::{FullscreenViewerInput, ViewerBackend, run_fullscreen_viewer}
 use dith_core::output::{OutputFormat, encode_image, render_braille};
 use dith_core::preprocess::plan_dimensions;
 use dith_core::preset::{OverwritePolicy, PresetScope, SavePresetRequest, save_local_preset};
-use dith_core::recipe::{RecipeError, run_pipeline};
+use dith_core::recipe::{RecipeError, run_pipeline, run_pipeline_owned};
 
 use super::shared::{
     RenderReport, emit_inline_kitty, emit_render_report, ensure_output_destination,
@@ -143,9 +143,13 @@ pub(crate) fn handle_apply(args: &ApplyArgs, as_json: bool) -> Result<()> {
     };
 
     let src_img = load_input_image(&args.input)?;
-    let output_data = run_pipeline(&src_img, &recipe)?;
-
     let interactive_fullscreen = wants_fullscreen && !as_json && io::stdout().is_terminal();
+    // Only the fullscreen viewer shows the source again; otherwise the pipeline can consume it.
+    let (output_data, raw_source) = if interactive_fullscreen {
+        (run_pipeline(&src_img, &recipe)?, Some(src_img))
+    } else {
+        (run_pipeline_owned(src_img, &recipe)?, None)
+    };
     let encoded = encode_image(&output_data.image, format, &recipe.export)?;
     let bytes_written = if interactive_fullscreen && args.output.is_none() {
         0
@@ -199,7 +203,7 @@ pub(crate) fn handle_apply(args: &ApplyArgs, as_json: bool) -> Result<()> {
         );
         run_fullscreen_viewer(&FullscreenViewerInput {
             primary: &output_data.image,
-            raw_source: Some(&src_img),
+            raw_source: raw_source.as_ref(),
             title,
             start_raw: false,
             backend: ViewerBackend::Kitty,
