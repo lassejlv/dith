@@ -50,6 +50,7 @@ pub mod ink;
 pub mod input;
 pub mod inspect;
 pub mod output;
+pub mod overlay;
 pub mod palette;
 pub mod preprocess;
 pub mod preset;

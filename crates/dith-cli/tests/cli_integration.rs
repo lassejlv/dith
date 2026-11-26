@@ -1314,3 +1314,154 @@ fn animate_sequences_take_per_frame_times_from_inputs_or_a_timings_file() {
     assert_eq!(dry["total_duration_ms"], 4250);
     assert!(!std::path::Path::new(&path("dry.gif")).exists());
 }
+
+#[test]
+fn ink_overlays_are_exact_snap_to_the_pixel_grid_and_change_per_frame() {
+    let dir = TempDir::new().unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    std::fs::write(
+        path("eye.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 48"><ellipse cx="20" cy="20" rx="5" ry="7" fill="#000"/><circle cx="19" cy="17" r="2" fill="#fff"/></svg>"##,
+    )
+    .unwrap();
+    std::fs::write(
+        path("shut.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 48"><path d="M15 21 Q20 26 25 21" stroke="#000" stroke-width="2" fill="none"/></svg>"##,
+    )
+    .unwrap();
+    let common = [
+        "--canvas-width",
+        "64",
+        "--canvas-height",
+        "48",
+        "--algorithm",
+        "atkinson",
+        "--colors",
+        "#F5F1EA,#171717",
+        "--pixel-size",
+        "2",
+    ];
+    let mut args = vec!["generate", "sphere", "-o"];
+    let out = path("eyes.png");
+    args.push(&out);
+    args.extend(common);
+    let eye = path("eye.svg");
+    args.extend(["--overlay", eye.as_str(), "--emit-recipe", "--json"]);
+    let (ok, report, err) = run_json(&args);
+    assert!(ok, "{err}");
+    assert_eq!(report["recipe"]["overlay"]["layers"][0], eye.as_str());
+    let img = image::open(&out).unwrap().to_rgba8();
+    assert_eq!(
+        img.get_pixel(20, 23).0,
+        [0x17, 0x17, 0x17, 255],
+        "eye is solid ink"
+    );
+    assert_eq!(
+        img.get_pixel(19, 17).0,
+        [0xF5, 0xF1, 0xEA, 255],
+        "highlight snaps to paper"
+    );
+    for by in 0..24 {
+        for bx in 0..32 {
+            let p = img.get_pixel(bx * 2, by * 2);
+            for (dx, dy) in [(1, 0), (0, 1), (1, 1)] {
+                assert_eq!(
+                    img.get_pixel(bx * 2 + dx, by * 2 + dy),
+                    p,
+                    "block {bx},{by}"
+                );
+            }
+        }
+    }
+
+    std::fs::write(path("r.json"), report["recipe"].to_string()).unwrap();
+    let (ok, _, err) = run_json(&[
+        "apply",
+        &path("eyes.png"),
+        "-o",
+        &path("noop.png"),
+        "--recipe",
+        &path("r.json"),
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+
+    let (ok, red, err) = run_json(&[
+        "generate",
+        "sphere",
+        "-o",
+        &path("red.png"),
+        "--canvas-width",
+        "64",
+        "--canvas-height",
+        "48",
+        "--overlay",
+        &eye,
+        "--overlay-color",
+        "#ff0000",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    assert_eq!(red["status"], "ok");
+    let red = image::open(path("red.png")).unwrap().to_rgba8();
+    assert_eq!(red.get_pixel(19, 17).0, [255, 0, 0, 255]);
+
+    let (ok, _, err) = run_json(&[
+        "generate",
+        "sphere",
+        "-o",
+        &path("x.png"),
+        "--overlay",
+        &path("missing.svg"),
+        "--json",
+    ]);
+    assert!(!ok);
+    assert_eq!(err["code"], "INVALID_ASSET");
+
+    let still = path("eyes.png");
+    let frames = format!("{eye},{}", path("shut.svg"));
+    let blink = path("blink.gif");
+    let mut anim = vec![
+        "animate",
+        still.as_str(),
+        still.as_str(),
+        "-o",
+        blink.as_str(),
+        "--overlay-frames",
+        frames.as_str(),
+        "--json",
+    ];
+    anim.extend(common.iter().skip(4));
+    let (ok, report, err) = run_json(&anim);
+    assert!(ok, "{err}");
+    assert!(report["frames"][1]["changed_pixels"].as_u64().unwrap() > 0);
+    let (ok, d, err) = run_json(&["diff", "--frames", &blink, "--json"]);
+    assert!(ok, "{err}");
+    let bbox = &d["union"]["bbox"];
+    let (x, y) = (bbox["x"].as_u64().unwrap(), bbox["y"].as_u64().unwrap());
+    let (w, h) = (
+        bbox["width"].as_u64().unwrap(),
+        bbox["height"].as_u64().unwrap(),
+    );
+    assert!(
+        x >= 14 && x + w <= 26 && y >= 12 && y + h <= 28,
+        "changes stay on the eye: {bbox}"
+    );
+
+    let one = path("shut.svg");
+    let (ok, _, err) = run_json(&[
+        "animate",
+        &still,
+        &still,
+        "-o",
+        &path("x.gif"),
+        "--overlay-frames",
+        &one,
+        "--json",
+    ]);
+    assert!(!ok);
+    assert!(
+        err["message"].as_str().unwrap().contains("1 overlays"),
+        "{err}"
+    );
+}

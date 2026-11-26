@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 
-use crate::cli::{DitherFlags, PreviewMode};
+use crate::cli::{DitherFlags, OverlayFlags, PreviewMode};
 use crate::viewer::{FullscreenAnimInput, ViewerBackend, run_fullscreen_animation_viewer};
 use dith_core::animate::{
     AnimDitherOptions, AnimFormat, AnimFrame, AnimatedOutput, Easing, FloatRange, ProceduralMotion,
@@ -25,7 +25,8 @@ use dith_core::preprocess::{FitMode, plan_dimensions};
 use dith_core::preset::{OverwritePolicy, PresetScope, SavePresetRequest, save_local_preset};
 use dith_core::recipe::{DitherRecipe, RecipeError};
 
-use super::shared::{emit_inline_kitty, load_input_image, palette_spec_label};
+use super::shared::{emit_inline_kitty, list_image_files, load_input_image, palette_spec_label};
+use dith_core::overlay::check_overlay;
 
 #[derive(Debug, Args)]
 pub struct AnimateArgs {
@@ -230,6 +231,14 @@ pub struct AnimateArgs {
     #[arg(short = 'F', long, conflicts_with = "inline")]
     pub fullscreen: bool,
 
+    /// One ink overlay per frame, composited like --overlay: a directory of SVG/PNG files (name
+    /// order) or a comma-separated list, one file per frame before --ping-pong and holds.
+    #[arg(long, value_name = "DIR|LIST")]
+    pub overlay_frames: Option<String>,
+
+    #[command(flatten)]
+    pub overlay: OverlayFlags,
+
     #[command(flatten)]
     pub flags: DitherFlags,
 }
@@ -366,6 +375,47 @@ fn read_timings(path: &Path) -> Result<Vec<FrameTime>, RecipeError> {
         .collect()
 }
 
+/// Overlay files from `--overlay-frames`: a directory's images in name order, or a comma list.
+fn parse_overlay_frames(spec: &str) -> Result<Vec<PathBuf>> {
+    let dir = Path::new(spec);
+    let files = if dir.is_dir() {
+        list_image_files(dir)?
+    } else {
+        spec.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect()
+    };
+    for file in &files {
+        check_overlay(file)?;
+    }
+    Ok(files)
+}
+
+/// Check one overlay per source frame, then repeat them the way --ping-pong and holds repeat frames.
+fn expand_overlay_frames(
+    list: &[PathBuf],
+    frame_count: usize,
+    args: &AnimateArgs,
+) -> Result<Vec<PathBuf>, RecipeError> {
+    if list.len() != frame_count {
+        return Err(RecipeError::Validation {
+            field: "overlay-frames",
+            reason: format!(
+                "lists {} overlays but the animation has {frame_count} frames",
+                list.len()
+            ),
+        });
+    }
+    let mut expanded = list.to_vec();
+    if args.ping_pong {
+        apply_ping_pong(&mut expanded);
+    }
+    apply_holds(&mut expanded, args.hold_start, args.hold_end);
+    Ok(expanded)
+}
+
 /// Delays from `--timings`, which must name exactly one time per frame.
 fn timings_for(
     timings: &[FrameTime],
@@ -451,6 +501,12 @@ fn resolve_animate_source(args: &AnimateArgs) -> AnimateSource {
 pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
     let procedural = matches!(resolve_animate_source(args), AnimateSource::Procedural(_));
     let mut recipe = args.flags.resolve_recipe_for(true, procedural)?;
+    args.overlay.apply(&mut recipe)?;
+    let overlay_frames = args
+        .overlay_frames
+        .as_deref()
+        .map(parse_overlay_frames)
+        .transpose()?;
     let wants_view = args.view || args.fullscreen;
     let wants_fullscreen = wants_view && !args.inline;
 
@@ -540,7 +596,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         _ => TemporalMode::Locked,
     });
 
-    let anim_dither_opts = AnimDitherOptions {
+    let mut anim_dither_opts = AnimDitherOptions {
         temporal,
         boil_rate: args.boil_rate,
         boil_amount: args.boil_amount,
@@ -556,6 +612,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         sweep_pixel_size: args.sweep_pixel_size,
         cycle_palette: args.cycle_palette,
         per_frame_palette: args.per_frame_palette,
+        overlay_frames: Vec::new(),
     };
 
     let source_label = match &source {
@@ -601,6 +658,9 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
             }
         };
         let (out_w, out_h) = plan_dimensions(src_w, src_h, &recipe.preprocess);
+        if let Some(list) = &overlay_frames {
+            expand_overlay_frames(list, planned_frames, args)?;
+        }
         let mut delays = match (&timings, &source) {
             (Some(t), _) => timings_for(t, planned_frames, fps)?,
             (None, AnimateSource::Sequence(list)) => list
@@ -689,6 +749,9 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         for (frame, delay_ms) in raw_frames.iter_mut().zip(delays) {
             frame.delay_ms = delay_ms;
         }
+    }
+    if let Some(list) = &overlay_frames {
+        anim_dither_opts.overlay_frames = expand_overlay_frames(list, raw_frames.len(), args)?;
     }
 
     if args.ping_pong {

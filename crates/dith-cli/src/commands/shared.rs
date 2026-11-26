@@ -57,6 +57,31 @@ pub(crate) fn load_input_image(path: &Path, plan: Option<&PreprocessOptions>) ->
     }
 }
 
+/// Image files (PNG, GIF, JPEG, WebP, BMP, TIFF, SVG) directly inside `dir`, in name order.
+pub(crate) fn list_image_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading directory '{}'", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                [
+                    "png", "gif", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "svg",
+                ]
+                .contains(&e.to_ascii_lowercase().as_str())
+            })
+        })
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(RecipeError::Validation {
+            field: "frames",
+            reason: format!("'{}' holds no image files", dir.display()),
+        }
+        .into());
+    }
+    Ok(files)
+}
+
 pub(crate) fn resolve_output_format(
     output: Option<&Path>,
     explicit: Option<OutputFormat>,

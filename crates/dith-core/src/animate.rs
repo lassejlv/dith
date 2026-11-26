@@ -27,6 +27,7 @@ use crate::output::{
     ColorUsage, PngLayout, color_histogram, encode_optimized_png_bytes, encode_png_bytes,
     write_output_file,
 };
+use crate::overlay::{composite_overlay, load_overlay};
 use crate::palette::{Palette, extract_adaptive_palette, extract_adaptive_palette_from_images};
 use crate::preprocess::{PreparedImage, PreprocessOptions, finalize_image, prepare_image};
 use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError};
@@ -367,6 +368,10 @@ pub struct AnimDitherOptions {
     pub cycle_palette: bool,
     /// Extract an adaptive palette per frame instead of locking one shared global palette.
     pub per_frame_palette: bool,
+    /// One overlay file (SVG or PNG) per frame, composited after dithering on top of the recipe's
+    /// own overlays, so eyes or lettering can change while the dithered picture stays put.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlay_frames: Vec<PathBuf>,
 }
 
 impl Default for AnimDitherOptions {
@@ -387,6 +392,7 @@ impl Default for AnimDitherOptions {
             sweep_pixel_size: None,
             cycle_palette: false,
             per_frame_palette: false,
+            overlay_frames: Vec::new(),
         }
     }
 }
@@ -612,6 +618,15 @@ pub fn dither_animation_frames(
     }
 
     let total = raw_frames.len();
+    if !anim_opts.overlay_frames.is_empty() && anim_opts.overlay_frames.len() != total {
+        return Err(RecipeError::Validation {
+            field: "overlay-frames",
+            reason: format!(
+                "lists {} overlays but the animation has {total} frames",
+                anim_opts.overlay_frames.len()
+            ),
+        });
+    }
     let source_dimensions = [raw_frames[0].image.width(), raw_frames[0].image.height()];
 
     // Step 1: build per-frame preprocess options (applying any tonal/pixel-size sweeps).
@@ -667,13 +682,11 @@ pub fn dither_animation_frames(
 
     let boil_rate = anim_opts.boil_rate.max(1);
 
-    // Step 3: dither and finalize every frame in parallel.
-    let dithered_frames: Result<Vec<AnimFrame>, RecipeError> = raw_frames
-        .par_iter()
-        .enumerate()
-        .map(|(frame_idx, raw)| {
+    // Step 3: dither every frame in parallel.
+    let dithered: Result<Vec<(RgbaImage, Palette)>, RecipeError> = (0..total)
+        .into_par_iter()
+        .map(|frame_idx| {
             let prep = prepared_of(frame_idx);
-            let prep_opts = &frame_prep_opts[frame_idx];
             let sweep_t = frame_sweep_t(frame_idx, total, anim_opts);
             let mut opts = recipe.dither.clone();
 
@@ -736,14 +749,50 @@ pub fn dither_animation_frames(
                 apply_palette_cycle(&mut dithered, &frame_palette, frame_idx, total);
             }
 
-            let final_img = finalize_image(dithered, prep, prep_opts);
-            Ok(AnimFrame {
-                image: final_img,
-                delay_ms: raw.delay_ms,
-            })
+            Ok((dithered, frame_palette))
         })
         .collect();
-    let dithered_frames = dithered_frames?;
+    let dithered = dithered?;
+
+    // Step 4: finalize (alpha, pixel-size upscale) and composite overlays as exact ink.
+    let (out_w, out_h) = (prepared[0].final_width, prepared[0].final_height);
+    let recipe_layers = recipe
+        .overlay
+        .layers
+        .iter()
+        .map(|p| load_overlay(p, out_w, out_h))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut frame_layers: HashMap<&Path, RgbaImage> = HashMap::new();
+    for path in &anim_opts.overlay_frames {
+        if !frame_layers.contains_key(path.as_path()) {
+            frame_layers.insert(path, load_overlay(path, out_w, out_h)?);
+        }
+    }
+    let dithered_frames: Vec<AnimFrame> = dithered
+        .into_par_iter()
+        .enumerate()
+        .map(|(frame_idx, (img, palette))| {
+            let prep_opts = &frame_prep_opts[frame_idx];
+            let mut image = finalize_image(img, prepared_of(frame_idx), prep_opts);
+            let frame_layer = anim_opts
+                .overlay_frames
+                .get(frame_idx)
+                .map(|p| &frame_layers[p.as_path()]);
+            for layer in recipe_layers.iter().chain(frame_layer) {
+                composite_overlay(
+                    &mut image,
+                    layer,
+                    &palette,
+                    &recipe.overlay,
+                    prep_opts.pixel_size,
+                );
+            }
+            AnimFrame {
+                image,
+                delay_ms: raw_frames[frame_idx].delay_ms,
+            }
+        })
+        .collect();
 
     let output_dimensions = [
         dithered_frames[0].image.width(),
