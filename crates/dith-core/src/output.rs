@@ -1141,24 +1141,49 @@ fn encode_bmp(img: &RgbaImage) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Write an uncompressed bottom-up palettized BMP (`BITMAPINFOHEADER`) at the smallest bit depth
-/// BMP supports for `palette` (1, 4, or 8 bits per pixel).
+/// Write a bottom-up palettized BMP (`BITMAPINFOHEADER`) for an opaque image with at most 256
+/// colors: uncompressed at the smallest bit depth BMP supports for `palette` (1, 4, or 8 bits per
+/// pixel), or run-length encoded (`BI_RLE4` up to 16 colors, else `BI_RLE8`) when that is smaller.
+///
+/// A black-then-white palette is never run-length encoded: Pillow reads it as a 1-bit image and
+/// then fails on RLE data.
 fn encode_indexed_bmp(img: &RgbaImage, palette: &[[u8; 4]]) -> Vec<u8> {
     const HEADERS_SIZE: usize = 14 + 40;
+    let width = img.width() as usize;
+    let indices = palette_indices(img, palette);
+    let rows = || indices.chunks(width.max(1)).rev();
+
     let depth: usize = match palette.len() {
         0..=2 => 1,
         3..=16 => 4,
         _ => 8,
     };
-    let width = img.width() as usize;
     let per_byte = 8 / depth;
     let row_len = width.div_ceil(per_byte).next_multiple_of(4);
-    let pixel_offset = HEADERS_SIZE + palette.len() * 4;
-    let image_size = row_len * img.height() as usize;
+    let mut raw = vec![0u8; row_len * img.height() as usize];
+    for (row, out) in rows().zip(raw.chunks_mut(row_len.max(1))) {
+        for (x, &index) in row.iter().enumerate() {
+            out[x / per_byte] |= index << (8 - depth * (x % per_byte + 1));
+        }
+    }
+    let nibbles = palette.len() <= 16;
+    let black_white =
+        palette.len() == 2 && palette[0][..3] == [0; 3] && palette[1][..3] == [255; 3];
+    let rle = bmp_rle(rows(), nibbles);
+    let (depth, compression, data) = if rle.len() < raw.len() && !black_white {
+        (
+            if nibbles { 4 } else { 8 },
+            if nibbles { 2 } else { 1 },
+            rle,
+        )
+    } else {
+        (depth, 0, raw)
+    };
 
-    let mut out = Vec::with_capacity(pixel_offset + image_size);
+    let pixel_offset = HEADERS_SIZE + palette.len() * 4;
+    let mut out = Vec::with_capacity(pixel_offset + data.len());
     out.extend_from_slice(b"BM");
-    out.extend_from_slice(&((pixel_offset + image_size) as u32).to_le_bytes());
+    out.extend_from_slice(&((pixel_offset + data.len()) as u32).to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&(pixel_offset as u32).to_le_bytes());
     out.extend_from_slice(&40u32.to_le_bytes());
@@ -1166,21 +1191,103 @@ fn encode_indexed_bmp(img: &RgbaImage, palette: &[[u8; 4]]) -> Vec<u8> {
     out.extend_from_slice(&img.height().to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes());
     out.extend_from_slice(&(depth as u16).to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&(image_size as u32).to_le_bytes());
+    out.extend_from_slice(&(compression as u32).to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
     out.extend_from_slice(&[0; 8]);
     out.extend_from_slice(&(palette.len() as u32).to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes());
     for c in palette {
         out.extend_from_slice(&[c[2], c[1], c[0], 0]);
     }
-    for row in palette_indices(img, palette).chunks(width.max(1)).rev() {
-        let start = out.len();
-        out.resize(start + row_len, 0);
-        for (x, &index) in row.iter().enumerate() {
-            out[start + x / per_byte] |= index << (8 - depth * (x % per_byte + 1));
+    out.extend_from_slice(&data);
+    out
+}
+
+/// BMP run-length encoding of rows of palette indices: `BI_RLE4` when `nibbles` (indices below 16),
+/// else `BI_RLE8`.
+///
+/// A run repeats one index in RLE8 and alternates two indices in RLE4, up to 255 pixels for two
+/// bytes; other pixels go into absolute-mode literals. A run is taken when it is long enough to
+/// beat the literal bytes it replaces, counting the literal header it costs when it splits one.
+/// RLE4 literals always hold an even number of pixels, because Pillow's decoder drops the last
+/// pixel of an odd one.
+fn bmp_rle<'a>(rows: impl Iterator<Item = &'a [u8]>, nibbles: bool) -> Vec<u8> {
+    fn push_literal(out: &mut Vec<u8>, pixels: &[u8], nibbles: bool) {
+        for chunk in pixels.chunks(if nibbles { 254 } else { 255 }) {
+            let absolute = match chunk.len() {
+                n if nibbles && n >= 4 => n & !1,
+                n if !nibbles && n >= 3 => n,
+                _ => 0,
+            };
+            if absolute > 0 {
+                out.extend_from_slice(&[0, absolute as u8]);
+                if nibbles {
+                    let (pairs, _) = chunk[..absolute].as_chunks::<2>();
+                    out.extend(pairs.iter().map(|&[a, b]| a << 4 | b));
+                } else {
+                    out.extend_from_slice(&chunk[..absolute]);
+                }
+                if out.len() % 2 == 1 {
+                    out.push(0);
+                }
+            }
+            for run in chunk[absolute..].chunks(if nibbles { 2 } else { 1 }) {
+                let second = if nibbles {
+                    run.get(1).map_or(0, |&b| b)
+                } else {
+                    0
+                };
+                out.extend_from_slice(&[
+                    run.len() as u8,
+                    run[0] << (if nibbles { 4 } else { 0 }) | second,
+                ]);
+            }
         }
     }
+
+    let (split, fresh) = if nibbles { (8, 4) } else { (5, 2) };
+    let mut out = Vec::new();
+    for (y, row) in rows.enumerate() {
+        if y > 0 {
+            out.extend_from_slice(&[0, 0]);
+        }
+        let mut literal = 0;
+        let mut i = 0;
+        while i < row.len() {
+            let extends = |run: usize| {
+                let at = i + run;
+                at < row.len()
+                    && run < 255
+                    && if nibbles {
+                        run < 2 || row[at] == row[at - 2]
+                    } else {
+                        row[at] == row[i]
+                    }
+            };
+            let mut run = 1;
+            while extends(run) {
+                run += 1;
+            }
+            if run >= if literal < i { split } else { fresh } {
+                push_literal(&mut out, &row[literal..i], nibbles);
+                let second = if nibbles && run > 1 { row[i + 1] } else { 0 };
+                out.extend_from_slice(&[
+                    run as u8,
+                    if nibbles {
+                        row[i] << 4 | second
+                    } else {
+                        row[i]
+                    },
+                ]);
+                i += run;
+                literal = i;
+            } else {
+                i += 1;
+            }
+        }
+        push_literal(&mut out, &row[literal..], nibbles);
+    }
+    out.extend_from_slice(&[0, 1]);
     out
 }
 
@@ -2009,6 +2116,34 @@ mod tests {
             })
             .collect();
         assert_eq!(bits_per_pixel, [1, 32, 4, 8, 24, 32, 1]);
+    }
+
+    #[test]
+    fn bmp_run_length_encodes_when_smaller() {
+        let layout = |img: &RgbaImage| {
+            let bytes = encode_image(img, OutputFormat::Bmp, &ExportOptions::default()).unwrap();
+            assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgba8(), *img);
+            let bits = u16::from_le_bytes([bytes[28], bytes[29]]);
+            (bits, u32::from_le_bytes(bytes[30..34].try_into().unwrap()))
+        };
+        let ink = |i: u32| Rgba([(i * 7) as u8, (200 - i * 3) as u8, (i * 5) as u8, 255]);
+        let hash = |x: u32, y: u32| (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) >> 7;
+        let mixed = |colors: u32| {
+            RgbaImage::from_fn(613, 9, move |x, y| {
+                ink(match x {
+                    0..300 => y % colors,
+                    300..500 => (x + y) % 2 * (colors - 1),
+                    _ => hash(x, y) % colors,
+                })
+            })
+        };
+        let sparse = RgbaImage::from_fn(613, 9, |x, y| ink(u32::from(x > 400 && (x + y) % 2 == 0)));
+        let noise = RgbaImage::from_fn(613, 9, |x, y| ink(hash(x, y) % 16));
+        let layouts: Vec<(u16, u32)> = [mixed(4), mixed(40), sparse, noise]
+            .iter()
+            .map(layout)
+            .collect();
+        assert_eq!(layouts, [(4, 2), (8, 1), (4, 2), (4, 0)]);
     }
 
     #[test]
