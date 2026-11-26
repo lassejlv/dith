@@ -142,6 +142,7 @@ Generators are procedural sources for `generate`, `animate`, `compare --pattern`
 | `rings` | Hypnotic zine covers, optical posters | Rings ripple outward |
 | `plasma` | Retro demos, synthwave, palette cycling | Field cycles through its period |
 | `checkerboard` | Architectural graphics, retro UI tiles | Grid scrolls diagonally while the vignette light orbits |
+| `inflate` | Your own `--shape` SVG/PNG puffed up and lit: mascots, characters, icons, logos | Shape stays still; the light orbits like `sphere` (`--cycles 0` keeps it still) |
 
 `--motion-amplitude` scales the motion (0 = still, 2 = dramatic). For rings, plasma, and checkerboard it sets the whole number of cycles per loop. `--cycles` repeats the whole motion several times per loop. `dith list generators --json` has the exact `motion` text.
 

@@ -5,7 +5,9 @@ description: >-
   Use when an agent needs to dither photos, logos, or other assets; generate procedural dither graphics (hero backgrounds, orbs, mesh gradients, textures) with no input image;
   animate GIFs, APNGs, spritesheets, film-boil loops, dissolves, or palette cycling; make 1-bit, Risograph, halftone, Game Boy, PICO-8, CRT, or other retro/print looks;
   apply exact brand palettes; build algorithm/preset/palette comparison contact sheets; save reusable local presets or replayable JSON recipes;
-  render Braille/ASCII/Kitty terminal previews; or batch-dither many files.
+  render Braille/ASCII/Kitty terminal previews; batch-dither many files; draw custom characters and icons from
+  hand-written SVG shapes (inflate generator, exact ink overlays, per-frame timing, flicker-free locked-diff blinks);
+  or prove what changed between two images or animation frames (dith diff).
 ---
 
 # Dith
@@ -53,6 +55,17 @@ Start from a preset, then override individual flags. Explicit flags always win o
 
 [references/catalog.md](references/catalog.md) has every preset, palette, algorithm, and generator with when to use each.
 
+## Draw a custom character or icon
+
+Build mascots and icons from hand-written SVGs with dith alone, never an image generator:
+
+1. **Body**: draw the silhouette's parts as separate filled SVG elements (head, ears, tail) and run `dith generate inflate --shape body.svg --blend 24 --angle 135 --ground-shadow`. Each top-level element is one shape; `--blend` melts them into one soft body, and the surface is lit like `sphere` (`--depth`, `--specular`, `--rim`, `--ambient`). Shapes stretch to the canvas, so give the SVG the canvas's aspect ratio. For a light, airy drawing raise `--ambient` (0.4..0.6) and lower `--depth` (0.6..0.8).
+2. **Soft tones** that should stay dithered (blush, patches, stripes): `--paint paint.svg`, where darker paint darkens the lit surface. A blurred, semi-transparent ellipse makes a blush.
+3. **Line work** (eyes, nose, mouth, outline): `--overlay face.svg`, repeatable. Overlays are composited after dithering as exact pixels in the nearest palette color, cut at 50% alpha, and snapped to the `--pixel-size` grid. Draw an outline as the silhouette dilated minus the silhouette (a mask), so it never crosses the face.
+4. **Animate** a blink or expression with `dith animate inflate ... --cycles 0 --overlay-frames open.svg,half.svg,closed.svg,half.svg --timings blink.json --temporal locked-diff`, then check it with `dith diff --frames out.gif --loop --json`.
+
+[references/recipes.md](references/recipes.md#custom-character-icon) has the full cat-icon recipe; the repository's `examples/cat-icon/` builds it end to end.
+
 ## Craft rules
 
 - **Tone before dithering.** Dithering amplifies flat or muddy input.
@@ -66,6 +79,7 @@ Start from a preset, then override individual flags. Explicit flags always win o
 - **Ordered screen size.** `--pattern-scale 2..4` enlarges Bayer, halftone, line, and blue-noise cells for bolder, more graphic texture.
 - **Color space.** Keep the default `oklab`. Use `srgb` only to mimic legacy hardware math; `linear` is physically linear light.
 - **Determinism.** Stochastic algorithms (`blue-noise`, `random`, `ign`), `--noise`, and `--auto-palette` use `--seed` (default 42). Change the seed for variations and keep it fixed for reproducibility.
+- **SVG input.** Any input can be an `.svg`. It is rasterized at the target size (`--width`, `--height`, `--max-dim`, or its own width/height/viewBox), keeps its alpha, and renders identically everywhere. Text elements are not drawn; convert text to paths.
 - **Transparency.** Logos and icons with alpha: `--alpha-mode preserve` keeps the alpha channel, `threshold` gives a crisp 1-bit mask, `dither` gives a stippled fade, and `flatten --background "#hex"` composites onto a color.
 - **Turning off preset parts.** Most monochrome presets turn on `--grayscale` and `--auto-levels`. Use `--no-grayscale`, `--no-auto-levels`, and `--no-serpentine` to disable what a preset turned on.
 
@@ -90,11 +104,12 @@ The format is inferred from the `-o` extension; pass `--format` to override it.
 
 Output goes to `.gif` or `.apng` (both exact-palette and delta-encoded; APNG also keeps partial transparency and is often a little smaller), a spritesheet `.png` via `--anim-format spritesheet --sheet-cols N`, or numbered PNG frames via `--frames-dir DIR`.
 
-- **Flicker.** `--temporal locked` (the default) fixes the screen and seed across frames, but it only makes static regions rock-solid with per-pixel algorithms: ordered screens (`bayer*`, `halftone`, line screens), `blue-noise`, `ign`, `random`, and `threshold`. Error diffusion (`floyd-steinberg`, `atkinson`, `stucki`, `riemersma`, ...) passes every change on to neighbouring pixels, so anything that moves makes the stipple shimmer below and to the right of it. Atkinson shimmers least. The `temporally_stable` field of `dith list algorithms --json` says which is which. `boil` gives a hand-drawn shimmer on purpose; set `--boil-rate 2` to animate "on twos". `grain` re-randomizes stipple every frame.
+- **Flicker.** `--temporal locked` (the default) fixes the screen and seed across frames, but it only makes static regions rock-solid with per-pixel algorithms: ordered screens (`bayer*`, `halftone`, line screens), `blue-noise`, `ign`, `random`, and `threshold`. Error diffusion (`floyd-steinberg`, `atkinson`, `stucki`, `riemersma`, ...) passes every change on to neighbouring pixels, so anything that moves makes the stipple shimmer below and to the right of it. Atkinson shimmers least. The `temporally_stable` field of `dith list algorithms --json` says which is which. `--temporal locked-diff` fixes that for error diffusion: each frame only takes pixels within `--diff-margin` (default 4 px) of a source change and copies the rest from the previous frame, so a blink stays a blink. `boil` gives a hand-drawn shimmer on purpose; set `--boil-rate 2` to animate "on twos". `grain` re-randomizes stipple every frame.
 - **Seamless loops.** Procedural patterns loop by construction. For sweeps, use `--sweep-mode pulse` or `--ping-pong`.
 - **Sweeps** animate a parameter over time: `--sweep-bias`, `--sweep-brightness`, `--sweep-contrast`, `--sweep-gamma`, `--sweep-strength`, `--sweep-pixel-size`, each written `START..END`. Shape them with `--easing`, and pause on keyframes with `--hold-start` and `--hold-end`.
 - **Palette.** One shared global palette is the default and keeps colors steady. Use `--per-frame-palette` only for footage whose colors change a lot.
-- **Timing.** Frames are capped at 2..=240. `--duration S` is an alternative to `--frames` (frames = S × fps); passing both is an error. GIF delays are stored in 10 ms steps, so `--fps 10|20|25|50` gives exact GIF timing (15 fps becomes 70 ms per frame). APNG is exact.
+- **Per-frame timing.** Hold one frame without repeating the file: `dith animate open.png:4200ms half.png:50ms shut.png:100ms half.png:50ms` (or `:84f` for 84 frames at `--fps`), or `--timings times.json` with one entry per frame (`[4200, 50, "2f", 50]`; works for every source). `--hold-start`/`--hold-end` add extra copies of the first/last frame, each at that frame's own delay, for any source including frame sequences. The report lists every frame's `delay_ms`, and for GIF its `encoded_delay_ms` plus a `timing_note` when a delay was rounded.
+- **Timing.** Procedural and boil frames are capped at 2..=240. `--duration S` is an alternative to `--frames` (frames = S × fps); passing both is an error. GIF delays are stored in 10 ms steps, so `--fps 10|20|25|50` gives exact GIF timing (15 fps becomes 70 ms per frame). APNG is exact.
 - **Size.** File size grows with frames × pixels, and dither noise barely compresses.
   - GIFs and APNGs are delta-encoded automatically: each frame after the first only stores what changed. Locked per-pixel algorithms with static areas are therefore far smaller than error diffusion or `boil`/`grain`, where nearly every pixel changes each frame.
   - To hit a budget, pass `--max-size 2MB` (also `500KB`, `1.5MiB`, or bytes). Dith shrinks the frame dimensions, keeping frame count and fps, until the file fits, and reports `size_fit_scale` (1.0 = untouched). If `size_fit_scale` comes back small (under about 0.5), the result may be too small to use. Lower the size another way instead: fewer frames, a locked ordered algorithm, or fewer palette colors.
@@ -111,13 +126,15 @@ Read the JSON report rather than assuming success:
 - `bytes_written > 0`; it is `0` on `--dry-run`.
 - `palette_colors` and `color_usage` are as expected. If one color covers more than about 95% of pixels, the image is nearly blank: adjust `--bias`, `--gamma`, or `--contrast`, or try `--invert`.
 
+To prove what changed, run `dith diff a.png b.png --json` (changed pixels, percentage, `bbox`, `changed_rows`/`changed_columns` runs, `-o` writes a highlight PNG) or `dith diff --frames anim.gif --loop --json`, whose `union` covers every pixel that changes in any frame. Every animate report also has `frames[].changed_pixels` and `changed_pixels_total`.
+
 When aesthetics matter, look at the output. Open PNG files with an image-viewing tool if you have one; otherwise add `--preview` to get a Braille thumbnail in `preview_braille`. For animations, export a spritesheet or `--frames-dir` and view the PNG frames. For SVGs, render a PNG with the same flags and view that.
 
 ## Errors
 
 With `--json`, errors go to stderr as `{"status":"error","code","message","suggestion","valid_values"?}`.
 
-- **Exit 2**: invalid input from you. Codes include `CLI_USAGE_ERROR`, `INVALID_ARGUMENT` (an out-of-range value; the message includes the range), `UNKNOWN_PRESET` and similar codes (`valid_values` lists the options), and `OUTPUT_EXISTS` (`--no-clobber` hit an existing file). Fix the flags and retry.
+- **Exit 2**: invalid input from you. Codes include `CLI_USAGE_ERROR`, `INVALID_ARGUMENT` (an out-of-range value; the message includes the range), `UNKNOWN_PRESET` and similar codes (`valid_values` lists the options), and `OUTPUT_EXISTS` (`--no-clobber` hit an existing file), and `INVALID_ASSET` (an `--overlay`, `--shape` or `--paint` file is missing or not an image). Fix the flags and retry.
 - **Exit 1**: runtime or I/O failure (`RUNTIME_ERROR`), such as a missing input or an undecodable file. `batch` also exits 1 when any item fails.
 
 ## Interactive vs headless
@@ -128,4 +145,4 @@ With `--json`, errors go to stderr as `{"status":"error","code","message","sugge
 
 - [references/cli.md](references/cli.md): every subcommand and flag, with ranges, defaults, and JSON report fields.
 - [references/catalog.md](references/catalog.md): presets, palettes, algorithms, and generators, and when to choose each.
-- [references/recipes.md](references/recipes.md): copy-ready recipes for common jobs (web hero, avatar, logo SVG, social card, CSS spritesheet, reveal GIF, brand preset, batch export).
+- [references/recipes.md](references/recipes.md): copy-ready recipes for common jobs (web hero, avatar, logo SVG, social card, CSS spritesheet, reveal GIF, custom character icon, brand preset, batch export).

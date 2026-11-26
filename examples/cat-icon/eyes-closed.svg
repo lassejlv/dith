@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="-1 -1 2 2">
+  <title>Closed eyes: small downward arcs</title>
+  <g fill="none" stroke="#171717" stroke-width="0.032" stroke-linecap="round">
+    <path d="M -0.32 0.05 Q -0.25 0.12 -0.18 0.05"/>
+    <path d="M 0.18 0.05 Q 0.25 0.12 0.32 0.05"/>
+  </g>
+</svg>
