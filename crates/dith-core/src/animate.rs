@@ -969,8 +969,9 @@ fn apply_palette_cycle(img: &mut RgbaImage, palette: &Palette, frame_idx: usize,
 /// Table (zero `NeuQuant` color drift, exact hex preservation, and ~10x faster encoding).
 ///
 /// Exact-palette animations are also delta-encoded: every frame only stores the bounding box of
-/// pixels that differ from what is already on the canvas. Its unchanged pixels are written either
-/// as they are or all as a reserved transparent index, whichever compresses smaller.
+/// pixels that differ from what is already on the canvas. Unchanged pixels inside it are written
+/// as their color, as a reserved transparent index, or a mix of both, whichever compresses best on
+/// the animation's largest frames.
 /// Animations with real transparency store whole frames that are cleared after display.
 ///
 /// # Errors
@@ -1069,45 +1070,63 @@ pub fn encode_gif(
         .map(|(&(canvas, region, _), cur)| canvas.frame_pixels(cur, region))
         .collect();
 
+    // Which way to fill unchanged pixels hardly varies within one animation, so every rule is
+    // tried on the two largest frames that have the choice and the winner is used for the rest.
+    let mut probes: Vec<usize> = (0..stored.len())
+        .filter(|&i| !stored[i].1.is_empty())
+        .collect();
+    probes.sort_by_key(|&i| std::cmp::Reverse(stored[i].0.len()));
+    probes.truncate(2);
+    let probe_results: Vec<(usize, UnchangedFill, (u8, Vec<u8>))> = probes
+        .iter()
+        .flat_map(|&i| UnchangedFill::ALL.map(|fill| (i, fill)))
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|(i, fill)| {
+            let (pixels, optional) = &stored[i];
+            (i, fill, fill.compress(pixels, optional, transparent))
+        })
+        .collect();
+    let chosen = UnchangedFill::ALL
+        .into_iter()
+        .min_by_key(|&fill| {
+            probe_results
+                .iter()
+                .filter(|r| r.1 == fill)
+                .map(|r| r.2.1.len())
+                .sum::<usize>()
+        })
+        .unwrap_or(UnchangedFill::Color);
+
     let gif_frames: Vec<gif_lzw::Frame> = plans
         .par_iter()
         .zip(&stored)
         .zip(frames)
-        .map(|((&(_, region, disposal), (pixels, optional)), frame)| {
-            let compress = |pixels: &[u8]| {
-                gif_lzw::compress(&gif_lzw::Indices {
-                    pixels,
-                    optional: &[],
-                    transparent,
-                    prefer_transparent: false,
-                })
-            };
-            let mut best = compress(pixels);
-            if !optional.is_empty() {
-                let marked: Vec<u8> = pixels
+        .enumerate()
+        .map(
+            |(i, ((&(_, region, disposal), (pixels, optional)), frame))| {
+                let (min_code_size, lzw) = probe_results
                     .iter()
-                    .zip(optional)
-                    .map(|(&index, &unchanged)| if unchanged { transparent } else { index })
-                    .collect();
-                let marked = compress(&marked);
-                if marked.1.len() < best.1.len() {
-                    best = marked;
+                    .filter(|r| r.0 == i)
+                    .min_by_key(|r| r.2.1.len())
+                    .map_or_else(
+                        || chosen.compress(pixels, optional, transparent),
+                        |r| r.2.clone(),
+                    );
+                // Regions lie inside the u16 canvas, so these conversions cannot truncate.
+                gif_lzw::Frame {
+                    left: region.x as u16,
+                    top: region.y as u16,
+                    width: region.w as u16,
+                    height: region.h as u16,
+                    delay: gif_delay_centis(frame.delay_ms),
+                    disposal,
+                    transparent: reserved.filter(|_| has_transparency || !optional.is_empty()),
+                    min_code_size,
+                    lzw,
                 }
-            }
-            let (min_code_size, lzw) = best;
-            // Regions lie inside the u16 canvas, so these conversions cannot truncate.
-            gif_lzw::Frame {
-                left: region.x as u16,
-                top: region.y as u16,
-                width: region.w as u16,
-                height: region.h as u16,
-                delay: gif_delay_centis(frame.delay_ms),
-                disposal,
-                transparent: reserved.filter(|_| has_transparency || !optional.is_empty()),
-                min_code_size,
-                lzw,
-            }
-        })
+            },
+        )
         .collect();
 
     Ok(gif_lzw::write_gif(
@@ -1117,6 +1136,58 @@ pub fn encode_gif(
         Some(loops),
         &gif_frames,
     ))
+}
+
+/// How a delta frame stores pixels that already show the right color, which it may write either
+/// as that color or as the transparent index. Boiling dither compresses best with its colors,
+/// static backgrounds as transparent runs, and some animations with a mix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnchangedFill {
+    /// Every pixel keeps its color.
+    Color,
+    /// Every unchanged pixel is transparent.
+    Transparent,
+    /// Runs of at least [`GIF_TRANSPARENT_RUN`] unchanged pixels are transparent; in shorter runs
+    /// the LZW encoder picks color or transparent per pixel, whichever continues its match further.
+    Mixed,
+}
+
+/// Unchanged pixels in a run of at least this many are transparent under [`UnchangedFill::Mixed`].
+const GIF_TRANSPARENT_RUN: usize = 16;
+
+impl UnchangedFill {
+    const ALL: [Self; 3] = [Self::Color, Self::Transparent, Self::Mixed];
+
+    /// LZW-compress one frame's `pixels`, where `optional` marks those that may be stored as
+    /// `transparent`, returning the minimum code size and code stream.
+    fn compress(self, pixels: &[u8], optional: &[bool], transparent: u8) -> (u8, Vec<u8>) {
+        if self == Self::Color {
+            return gif_lzw::compress(&gif_lzw::Indices {
+                pixels,
+                optional: &[],
+                transparent,
+            });
+        }
+        let mut filled = pixels.to_vec();
+        let mut still_optional = optional.to_vec();
+        let mut start = 0;
+        for run in optional.chunk_by(|a, b| a == b) {
+            let end = start + run.len();
+            if run[0] && (self == Self::Transparent || run.len() >= GIF_TRANSPARENT_RUN) {
+                filled[start..end].fill(transparent);
+                still_optional[start..end].fill(false);
+            }
+            start = end;
+        }
+        if !still_optional.contains(&true) {
+            still_optional.clear();
+        }
+        gif_lzw::compress(&gif_lzw::Indices {
+            pixels: &filled,
+            optional: &still_optional,
+            transparent,
+        })
+    }
 }
 
 /// GIF frame delay in centiseconds for a delay in milliseconds: GIF stores 10 ms steps, and
@@ -1743,6 +1814,42 @@ mod tests {
             delta_size < single * 3,
             "10 delta frames ({delta_size} B) should cost far less than 10 full frames (~{} B)",
             single * 10
+        );
+    }
+
+    #[test]
+    fn static_noise_background_gif_stores_only_the_motion() {
+        let mut state = 0x2545_f491_u32;
+        let background = RgbaImage::from_fn(96, 64, |_, _| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            if state.is_multiple_of(2) {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        });
+        let frames: Vec<AnimFrame> = (0..10u32)
+            .map(|i| {
+                let mut image = background.clone();
+                for y in 20..30 {
+                    for x in i * 8..i * 8 + 10 {
+                        image.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+                    }
+                }
+                AnimFrame {
+                    image,
+                    delay_ms: 100,
+                }
+            })
+            .collect();
+        let palette = Palette::from_hex_list("#000000,#ffffff").unwrap();
+        let size = assert_gif_roundtrips_exactly(&frames, &palette);
+        let single = encode_gif(&frames[..1], &palette, 0, false).unwrap().len();
+        assert!(
+            size < single * 2,
+            "9 moving-square deltas ({size} B) should cost less than one noise frame ({single} B)"
         );
     }
 
