@@ -1184,29 +1184,121 @@ fn encode_indexed_bmp(img: &RgbaImage, palette: &[[u8; 4]]) -> Vec<u8> {
     out
 }
 
-/// Encode `img` as a Deflate-compressed TIFF in the smallest exact sample layout: 8-bit gray when
-/// it is opaque and colorless, else RGB when opaque, else RGBA.
+/// Raw image bytes per TIFF strip (rounded up to whole rows), the split the `tiff` crate's encoder
+/// uses, so no reader needs one huge decompression buffer.
+const TIFF_STRIP_BYTES: usize = 1_000_000;
+
+/// Encode `img` as a Deflate-compressed baseline TIFF in the smallest exact layout that dith's own
+/// decoder reads back: 1-bit bilevel when every pixel is opaque black or white, 8-bit gray when it
+/// is opaque and colorless, else RGB when opaque, else RGBA with unassociated alpha.
+///
+/// Bilevel strips are compressed with the near-optimal DEFLATE encoder used for indexed PNGs; 8-bit
+/// strips are three to four times larger and go through flate2 at its best level, which is several
+/// times faster on them. Palette-color TIFFs would be smaller still, but the `tiff` decoder behind
+/// `image` cannot read them.
 fn encode_tiff(img: &RgbaImage) -> Result<Vec<u8>> {
-    use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
+    use std::io::Write as _;
+
+    const SHORT: u16 = 3;
+    const LONG: u16 = 4;
+    const RATIONAL: u16 = 5;
 
     let (width, height) = img.dimensions();
     let (pixels, _) = img.as_raw().as_chunks::<4>();
     let opaque = pixels.iter().all(|px| px[3] == 255);
-    let mut out = Cursor::new(Vec::new());
-    let mut encoder = TiffEncoder::new(&mut out)
-        .context("encoding tiff output")?
-        .with_compression(Compression::Deflate(DeflateLevel::Best));
-    if opaque && pixels.iter().all(|px| px[0] == px[1] && px[1] == px[2]) {
-        let gray: Vec<u8> = pixels.iter().map(|px| px[0]).collect();
-        encoder.write_image::<colortype::Gray8>(width, height, &gray)
+    let gray = opaque && pixels.iter().all(|px| px[0] == px[1] && px[1] == px[2]);
+    let (bits, samples, data) = if gray && pixels.iter().all(|px| px[0] == 0 || px[0] == 255) {
+        let row_bytes = (width as usize).div_ceil(8);
+        let mut bilevel = vec![0u8; row_bytes * height as usize];
+        for (row, out) in pixels
+            .chunks(width.max(1) as usize)
+            .zip(bilevel.chunks_mut(row_bytes.max(1)))
+        {
+            for (x, px) in row.iter().enumerate() {
+                out[x / 8] |= (px[0] & 1) << (7 - x % 8);
+            }
+        }
+        (1, 1, bilevel)
+    } else if gray {
+        (8, 1, pixels.iter().map(|px| px[0]).collect())
     } else if opaque {
-        let rgb: Vec<u8> = pixels.iter().flat_map(|px| [px[0], px[1], px[2]]).collect();
-        encoder.write_image::<colortype::RGB8>(width, height, &rgb)
+        let rgb = pixels.iter().flat_map(|px| [px[0], px[1], px[2]]).collect();
+        (8, 3, rgb)
     } else {
-        encoder.write_image::<colortype::RGBA8>(width, height, img.as_raw())
+        (8, 4, img.as_raw().clone())
+    };
+    let row_bytes = data.len() / height.max(1) as usize;
+    let rows_per_strip = TIFF_STRIP_BYTES
+        .div_ceil(row_bytes.max(1))
+        .min(height.max(1) as usize);
+
+    let mut out = b"II*\0\0\0\0\0".to_vec();
+    let mut offsets = Vec::new();
+    let mut lengths = Vec::new();
+    for strip in data.chunks((rows_per_strip * row_bytes).max(1)) {
+        let compressed = if bits == 1 {
+            crate::deflate::zlib_compress(strip, row_bytes, Effort::DEFAULT)
+        } else {
+            let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+            zlib.write_all(strip)?;
+            zlib.finish()?
+        };
+        offsets.push(u32::try_from(out.len())?);
+        lengths.push(u32::try_from(compressed.len())?);
+        out.extend_from_slice(&compressed);
     }
-    .context("encoding tiff output")?;
-    Ok(out.into_inner())
+    out.resize(out.len().next_multiple_of(2), 0);
+
+    let mut tags: Vec<(u16, u16, Vec<u32>)> = vec![
+        (256, LONG, vec![width]),
+        (257, LONG, vec![height]),
+        (258, SHORT, vec![bits; samples]),
+        (259, SHORT, vec![8]),
+        (262, SHORT, vec![if samples < 3 { 1 } else { 2 }]),
+        (273, LONG, offsets),
+        (277, SHORT, vec![samples as u32]),
+        (278, LONG, vec![rows_per_strip as u32]),
+        (279, LONG, lengths),
+        (282, RATIONAL, vec![1, 1]),
+        (283, RATIONAL, vec![1, 1]),
+        (296, SHORT, vec![1]),
+    ];
+    if samples == 4 {
+        tags.push((338, SHORT, vec![2]));
+    }
+    let ifd = out.len();
+    out[4..8].copy_from_slice(&u32::try_from(ifd)?.to_le_bytes());
+    let external = ifd + 2 + tags.len() * 12 + 4;
+    let mut extra = Vec::new();
+    out.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+    for (tag, kind, values) in tags {
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|&v| match kind {
+                SHORT => (v as u16).to_le_bytes().to_vec(),
+                _ => v.to_le_bytes().to_vec(),
+            })
+            .collect();
+        let count = if kind == RATIONAL {
+            values.len() / 2
+        } else {
+            values.len()
+        };
+        out.extend_from_slice(&tag.to_le_bytes());
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&(count as u32).to_le_bytes());
+        if bytes.len() <= 4 {
+            let mut field = [0; 4];
+            field[..bytes.len()].copy_from_slice(&bytes);
+            out.extend_from_slice(&field);
+        } else {
+            out.extend_from_slice(&u32::try_from(external + extra.len())?.to_le_bytes());
+            extra.extend_from_slice(&bytes);
+        }
+    }
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&extra);
+    Ok(out)
 }
 
 /// The most compact exact PNG pixel layout for a set of images (one still, or every animation frame).
@@ -1926,6 +2018,53 @@ mod tests {
             assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgba8(), img);
             assert!(bytes.len() < img.as_raw().len());
         }
+    }
+
+    #[test]
+    fn tiff_uses_smallest_layout_dith_reads_back() {
+        let mut samples = layout_samples();
+        samples.push(RgbaImage::from_fn(13, 7, |x, y| {
+            let v = if (x * 3 + y) % 4 == 0 { 255 } else { 0 };
+            Rgba([v, v, v, 255])
+        }));
+        let layouts: Vec<(u16, u16)> = samples
+            .iter()
+            .map(|img| {
+                let bytes =
+                    encode_image(img, OutputFormat::Tiff, &ExportOptions::default()).unwrap();
+                assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgba8(), *img);
+                let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+                let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+                let ifd = u32_at(4) as usize;
+                let entry = |tag: u16| {
+                    (0..usize::from(u16_at(ifd)))
+                        .map(|i| ifd + 2 + i * 12)
+                        .find(|&at| u16_at(at) == tag)
+                        .unwrap()
+                };
+                let samples = u16_at(entry(277) + 8);
+                let bits = entry(258) + 8;
+                let bits = if samples > 2 {
+                    u16_at(u32_at(bits) as usize)
+                } else {
+                    u16_at(bits)
+                };
+                (samples, bits)
+            })
+            .collect();
+        assert_eq!(
+            layouts,
+            [
+                (3, 8),
+                (4, 8),
+                (3, 8),
+                (3, 8),
+                (3, 8),
+                (4, 8),
+                (1, 8),
+                (1, 1)
+            ]
+        );
     }
 
     #[test]
