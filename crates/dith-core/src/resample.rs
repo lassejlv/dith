@@ -54,8 +54,9 @@ fn lanczos3_taps(src_len: u32, dst_len: u32) -> Vec<Taps> {
         .collect()
 }
 
-/// `imageops::resize(src, width, height, FilterType::Lanczos3)`.
-pub(crate) fn resize_lanczos3(src: &RgbaImage, width: u32, height: u32) -> RgbaImage {
+/// `imageops::resize(src, width, height, FilterType::Lanczos3)`, byte for byte.
+#[must_use]
+pub fn resize_lanczos3(src: &RgbaImage, width: u32, height: u32) -> RgbaImage {
     if src.width() == 0 || src.height() == 0 || (width, height) == src.dimensions() {
         return image::imageops::resize(src, width, height, image::imageops::FilterType::Lanczos3);
     }
@@ -91,7 +92,7 @@ pub(crate) fn resize_lanczos3(src: &RgbaImage, width: u32, height: u32) -> RgbaI
                 }
             },
         );
-    RgbaImage::from_raw(width, height, out).expect("exact RGBA buffer dimensions")
+    RgbaImage::from_raw(width, height, out).unwrap_or_else(|| RgbaImage::new(width, height))
 }
 
 /// The single source index `image`'s nearest filter reads for each output coordinate.
@@ -107,7 +108,8 @@ fn nearest_indices(src_len: u32, dst_len: u32) -> Vec<usize> {
 
 /// `imageops::resize(src, width, height, FilterType::Nearest)`: with a box kernel of zero support
 /// every output pixel reads exactly one source pixel with weight 1, so this is a copy.
-pub(crate) fn resize_nearest(src: &RgbaImage, width: u32, height: u32) -> RgbaImage {
+#[must_use]
+pub fn resize_nearest(src: &RgbaImage, width: u32, height: u32) -> RgbaImage {
     if src.width() == 0 || src.height() == 0 || (width, height) == src.dimensions() {
         return image::imageops::resize(src, width, height, image::imageops::FilterType::Nearest);
     }
@@ -124,7 +126,7 @@ pub(crate) fn resize_nearest(src: &RgbaImage, width: u32, height: u32) -> RgbaIm
                 *px = src_row[x];
             }
         });
-    RgbaImage::from_raw(width, height, out).expect("exact RGBA buffer dimensions")
+    RgbaImage::from_raw(width, height, out).unwrap_or_else(|| RgbaImage::new(width, height))
 }
 
 #[cfg(test)]

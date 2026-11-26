@@ -52,10 +52,10 @@ pub mod palette;
 pub mod preprocess;
 pub mod preset;
 pub mod recipe;
+pub mod resample;
 
 mod nearest;
 mod png_optimize;
-mod resample;
 mod webp;
 
 pub use image;

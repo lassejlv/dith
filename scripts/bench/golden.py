@@ -149,6 +149,11 @@ def build_cases(binary, corpus):
     add("compare/presets", ["compare", c("wave-1200.png"), "--presets", ",".join(presets), "-o", "{O}/sheet.png", "--out-dir", "{O}/variants"])
     add("compare/palettes", ["compare", c("alpha-1024.png"), "--palettes", "bw,newsprint,risograph-blue,gameboy,pico8,c64,web216", "--light", "--columns", "3", "-o", "{O}/sheet.webp"])
     add("compare/pattern", ["compare", "--pattern", "mesh", "--algorithms", "floyd-steinberg,bayer8,blue-noise,riemersma", "-o", "{O}/sheet.png"])
+    add("compare/cover", ["compare", c("wheatfield-3000.jpg"), "--algorithms", "atkinson,bayer4", "--width", "300", "--height", "300", "--fit", "cover", "-o", "{O}/sheet.png"])
+    add("compare/contain", ["compare", c("wheatfield-3000.jpg"), "--algorithms", "atkinson,bayer4", "--width", "300", "--height", "300", "-o", "{O}/sheet.png"])
+    add("compare/scale", ["compare", c("wheatfield-3000.jpg"), "--presets", "pico8,gameboy,manga", "--scale", "0.15", "-o", "{O}/sheet.png", "--out-dir", "{O}/variants"])
+    add("compare/pixel-size", ["compare", c("wheatfield-3000.jpg"), "--palettes", "bw,pico8", "--pixel-size", "3", "--tile-max-dim", "500", "-o", "{O}/sheet.png"])
+    add("compare/small-source", ["compare", c("seq-01.png"), "--algorithms", "floyd-steinberg,bayer8", "--tile-max-dim", "400", "-o", "{O}/sheet.png"])
     add("compare/flags", ["compare", c("tetons-1600.jpg"), "--algorithms", "atkinson,ostromoukhov,halftone", "-p", "gameboy", "--contrast", "0.2", "--tile-max-dim", "500", "-o", "{O}/sheet.png"])
     return cases
 
