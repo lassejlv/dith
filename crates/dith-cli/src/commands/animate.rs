@@ -71,11 +71,22 @@ pub struct AnimateArgs {
     #[arg(long, default_value_t = 0)]
     pub loops: u16,
 
-    /// Temporal dither mode across frames (locked = fixed screen, boil = Risograph film boil, grain = lively stipple).
+    /// Temporal dither mode across frames (locked = fixed screen, boil = Risograph film boil, grain = lively stipple,
+    /// locked-diff = locked plus only redrawing pixels near a source change).
     /// Locked is only flicker-free with per-pixel algorithms (ordered screens, blue-noise, ign, random); error
-    /// diffusion propagates motion into static areas.
+    /// diffusion propagates motion into static areas, which locked-diff stops.
     #[arg(long, value_enum)]
     pub temporal: Option<TemporalMode>,
+
+    /// With --temporal locked-diff: luminance change (0.0..=1.0) a source pixel needs to count as
+    /// changed (default 0 = any change).
+    #[arg(long)]
+    pub diff_threshold: Option<f32>,
+
+    /// With --temporal locked-diff: pixels the changed area grows by before it is redrawn (0..=256,
+    /// default 4, rounded up to whole --pixel-size cells).
+    #[arg(long)]
+    pub diff_margin: Option<u32>,
 
     /// Film-boil cadence: update boil pattern every N frames (1 = every frame, 2 = on twos, 3 = on threes).
     #[arg(long, default_value_t = 1)]
@@ -616,7 +627,18 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         cycle_palette: args.cycle_palette,
         per_frame_palette: args.per_frame_palette,
         overlay_frames: Vec::new(),
+        diff_threshold: args.diff_threshold.unwrap_or(0.0),
+        diff_margin: args.diff_margin.unwrap_or(4),
     };
+    if temporal != TemporalMode::LockedDiff
+        && (args.diff_threshold.is_some() || args.diff_margin.is_some())
+    {
+        return Err(RecipeError::Validation {
+            field: "diff-threshold",
+            reason: "--diff-threshold and --diff-margin need --temporal locked-diff".to_string(),
+        }
+        .into());
+    }
 
     let source_label = match &source {
         AnimateSource::Procedural(p) => format!("animate:{}", p.id()),
