@@ -2,12 +2,14 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::color::{ColorSpace, LinearRgb, Oklab, ParseColorError, Rgb};
+use crate::nearest::{Matcher, NearestGrid};
 
 /// Error returned when resolving, parsing, or loading a color palette fails.
 #[derive(Debug, Error)]
@@ -51,6 +53,8 @@ pub struct Palette {
     /// Per-channel spread estimate used to calibrate ordered/stochastic dither amplitude.
     ordered_spread_linear: [f32; 3],
     ordered_spread_srgb: [f32; 3],
+    /// Lazily built nearest-color grids, one per color space, shared by clones of this palette.
+    nearest_grids: [OnceLock<Arc<NearestGrid>>; 3],
 }
 
 impl Palette {
@@ -89,6 +93,7 @@ impl Palette {
             oklab,
             ordered_spread_linear,
             ordered_spread_srgb,
+            nearest_grids: Default::default(),
         })
     }
 
@@ -126,6 +131,23 @@ impl Palette {
     #[must_use]
     pub fn srgb_colors(&self) -> &[[f32; 3]] {
         &self.srgb_f32
+    }
+
+    pub(crate) fn oklab_colors(&self) -> &[Oklab] {
+        &self.oklab
+    }
+
+    /// Fast lookups that return exactly what [`Self::nearest_index_from_linear`] (Oklab and
+    /// linear) or [`Self::nearest_index_from_srgb`] (sRGB) return for the same sample.
+    pub(crate) fn matcher(&self, space: ColorSpace) -> Matcher<'_> {
+        let slot = match space {
+            ColorSpace::Oklab => 0,
+            ColorSpace::Linear => 1,
+            ColorSpace::Srgb => 2,
+        };
+        let grid = (self.len() <= Matcher::MAX_PALETTE)
+            .then(|| &**self.nearest_grids[slot].get_or_init(|| Arc::new(NearestGrid::new())));
+        Matcher::new(self, space, grid)
     }
 
     /// Calibrated per-channel dither spread in the given color space.

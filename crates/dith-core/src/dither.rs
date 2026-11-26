@@ -6,7 +6,7 @@ use image::{Rgba, RgbaImage};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::color::{ColorSpace, LinearRgb, Rgb, srgb_u8_to_linear};
+use crate::color::{ColorSpace, Rgb, srgb_u8_to_linear};
 use crate::ink::{SolidInk, apply_solid_ink};
 use crate::palette::{Palette, SplitMix64};
 
@@ -824,15 +824,6 @@ fn palette_work_color(palette: &Palette, idx: usize, space: ColorSpace) -> [f32;
     }
 }
 
-fn match_work_color(palette: &Palette, sample: [f32; 3], space: ColorSpace) -> usize {
-    match space {
-        ColorSpace::Oklab | ColorSpace::Linear => {
-            palette.nearest_index_from_linear(LinearRgb::from_array(sample), space)
-        }
-        ColorSpace::Srgb => palette.nearest_index_from_srgb(sample),
-    }
-}
-
 fn diffuse_kernel(
     img: &RgbaImage,
     palette: &Palette,
@@ -861,6 +852,7 @@ fn diffuse_kernel(
     let noise = opts.noise.clamp(0.0, 0.5);
     let mut rng = SplitMix64::new(opts.seed ^ 0xD174_E800_1234_5678);
     let palette_rgb = palette.colors();
+    let matcher = palette.matcher(opts.color_space);
 
     for y in 0..h {
         let reverse = opts.serpentine && (y % 2 == 1);
@@ -885,7 +877,7 @@ fn diffuse_kernel(
                 (bpx[1] + bias + jitter).clamp(0.0, 1.0),
                 (bpx[2] + bias + jitter).clamp(0.0, 1.0),
             ];
-            let chosen_idx = match_work_color(palette, cur, opts.color_space);
+            let chosen_idx = matcher.nearest(cur);
             let chosen_rgb = palette_rgb[chosen_idx];
             let chosen_work = palette_work_color(palette, chosen_idx, opts.color_space);
             let o = idx * 4;
@@ -1002,6 +994,7 @@ fn diffuse_ostromoukhov(img: &RgbaImage, palette: &Palette, opts: &DitherOptions
     let noise = opts.noise.clamp(0.0, 0.5);
     let mut rng = SplitMix64::new(opts.seed ^ 0x0578_0300_ABCD_EF01);
     let palette_rgb = palette.colors();
+    let matcher = palette.matcher(opts.color_space);
 
     for y in 0..h {
         let reverse = opts.serpentine && (y % 2 == 1);
@@ -1026,7 +1019,7 @@ fn diffuse_ostromoukhov(img: &RgbaImage, palette: &Palette, opts: &DitherOptions
                 (bpx[1] + bias + jitter).clamp(0.0, 1.0),
                 (bpx[2] + bias + jitter).clamp(0.0, 1.0),
             ];
-            let chosen_idx = match_work_color(palette, cur, opts.color_space);
+            let chosen_idx = matcher.nearest(cur);
             let chosen_rgb = palette_rgb[chosen_idx];
             let chosen_work = palette_work_color(palette, chosen_idx, opts.color_space);
             let o = idx * 4;
@@ -1082,6 +1075,7 @@ fn ordered_dither(
     let ox = opts.pattern_offset[0] as usize;
     let oy = opts.pattern_offset[1] as usize;
     let colors = palette.colors();
+    let matcher = palette.matcher(opts.color_space);
 
     dst.par_chunks_exact_mut(w * 4)
         .enumerate()
@@ -1115,7 +1109,7 @@ fn ordered_dither(
                     (work[1] + (threshold + jitter) * spread[1] * strength + bias).clamp(0.0, 1.0),
                     (work[2] + (threshold + jitter) * spread[2] * strength + bias).clamp(0.0, 1.0),
                 ];
-                let c = colors[match_work_color(palette, sample, opts.color_space)];
+                let c = colors[matcher.nearest(sample)];
                 out_row[off] = c.r;
                 out_row[off + 1] = c.g;
                 out_row[off + 2] = c.b;
@@ -1149,6 +1143,7 @@ fn stochastic_dither(
     let seed_offset_x = (opts.seed % 1021) as f32 + opts.pattern_offset[0] as f32;
     let seed_offset_y = ((opts.seed / 1021) % 1031) as f32 + opts.pattern_offset[1] as f32;
     let colors = palette.colors();
+    let matcher = palette.matcher(opts.color_space);
 
     dst.par_chunks_exact_mut(w * 4)
         .enumerate()
@@ -1183,7 +1178,7 @@ fn stochastic_dither(
                     (work[1] + t * spread[1] * strength + bias).clamp(0.0, 1.0),
                     (work[2] + t * spread[2] * strength + bias).clamp(0.0, 1.0),
                 ];
-                let c = colors[match_work_color(palette, sample, opts.color_space)];
+                let c = colors[matcher.nearest(sample)];
                 out_row[off] = c.r;
                 out_row[off + 1] = c.g;
                 out_row[off + 2] = c.b;
@@ -1201,6 +1196,7 @@ fn threshold_dither(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) ->
     let mut dst = vec![0u8; w * h * 4];
     let bias = opts.bias.clamp(-0.5, 0.5);
     let colors = palette.colors();
+    let matcher = palette.matcher(opts.color_space);
 
     dst.par_chunks_exact_mut(w * 4)
         .enumerate()
@@ -1221,7 +1217,7 @@ fn threshold_dither(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) ->
                     (work[1] + bias).clamp(0.0, 1.0),
                     (work[2] + bias).clamp(0.0, 1.0),
                 ];
-                let c = colors[match_work_color(palette, sample, opts.color_space)];
+                let c = colors[matcher.nearest(sample)];
                 out_row[off] = c.r;
                 out_row[off + 1] = c.g;
                 out_row[off + 2] = c.b;
@@ -1256,6 +1252,7 @@ fn riemersma_dither(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) ->
     }
 
     let mut err_queue = [[0.0f32; 3]; QUEUE_LEN];
+    let matcher = palette.matcher(opts.color_space);
     let mut out = RgbaImage::new(w, h);
     let strength = opts.strength.clamp(0.0, 1.5);
     let bias = opts.bias.clamp(-0.5, 0.5);
@@ -1284,7 +1281,7 @@ fn riemersma_dither(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) ->
             (work[1] + acc[1] * strength + bias).clamp(0.0, 1.0),
             (work[2] + acc[2] * strength + bias).clamp(0.0, 1.0),
         ];
-        let chosen_idx = match_work_color(palette, sample, opts.color_space);
+        let chosen_idx = matcher.nearest(sample);
         let chosen_rgb: Rgb = palette.colors()[chosen_idx];
         let chosen_work = palette_work_color(palette, chosen_idx, opts.color_space);
         out.put_pixel(
