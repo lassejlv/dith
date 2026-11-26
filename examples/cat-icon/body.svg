@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="-1 -1 2 2">
+  <title>Cat body: head and two ears, each its own shape so dith inflate melts them together with --blend</title>
+  <path d="M -0.58 -0.20 L -0.47 -0.68 L -0.20 -0.43 Z" fill="#000" stroke="#000" stroke-width="0.12" stroke-linejoin="round"/>
+  <path d="M 0.58 -0.20 L 0.47 -0.68 L 0.20 -0.43 Z" fill="#000" stroke="#000" stroke-width="0.12" stroke-linejoin="round"/>
+  <ellipse cx="0" cy="0.10" rx="0.66" ry="0.54" fill="#000"/>
+</svg>

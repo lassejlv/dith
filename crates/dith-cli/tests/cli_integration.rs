@@ -1729,3 +1729,40 @@ fn locked_diff_keeps_error_diffusion_still_outside_what_moves() {
     assert!(!ok);
     assert_eq!(err["code"], "INVALID_ARGUMENT");
 }
+
+#[test]
+fn catalogs_list_the_new_command_generator_and_flags() {
+    let (ok, caps, _) = run_json(&["capabilities"]);
+    assert!(ok);
+    let has = |list: &str, key: &str, value: &str| {
+        caps[list]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e[key].as_str().is_some_and(|v| v.contains(value)))
+    };
+    assert!(has("commands", "name", "diff"));
+    assert!(has("generators", "id", "inflate"));
+    for flag in [
+        "--diff-margin",
+        "--overlay-alpha",
+        "--blend",
+        "--ground-shadow",
+        "--paint",
+        "--timings",
+    ] {
+        assert!(
+            has("parameter_ranges", "flag", flag),
+            "capabilities lacks {flag}"
+        );
+    }
+    assert!(has("parameter_ranges", "range", "locked-diff"));
+    let (ok, gens, _) = run_json(&["list", "generators", "--json"]);
+    assert!(ok);
+    assert!(
+        gens.as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["id"] == "inflate")
+    );
+}

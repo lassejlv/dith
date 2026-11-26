@@ -14,6 +14,8 @@ Every subcommand accepts `--json`. `dith <command> --help` is always authoritati
 - [batch](#batch)
 - [preview](#preview)
 - [preset](#preset)
+- [diff](#diff)
+- [Ink overlays](#ink-overlays) (apply, generate, animate)
 - [JSON reports](#json-reports)
 - [Errors and exit codes](#errors-and-exit-codes)
 
@@ -157,7 +159,9 @@ dith apply <INPUT|-> [-o <PATH|->] [shared flags] [options]
 | `--preview` | Add a Braille thumbnail as `preview_braille` in the report. |
 | `--view` / `-F` / `--inline` | Kitty-protocol terminal viewer, for interactive TTYs only. |
 
-Inputs can be PNG, JPEG, WebP, GIF (first frame), BMP, or TIFF.
+Inputs can be PNG, JPEG, WebP, GIF (first frame), BMP, TIFF, or SVG. An SVG is rasterized at the target size (`--width`/`--height`/`--max-dim`, or its own width/height/viewBox) with its alpha kept, so `--alpha-mode` works as for PNG. SVG text is not drawn; convert it to paths. SVG input works the same in `generate`/`animate` frame lists, `batch`, `compare`, `preview`, `inspect` and `diff`.
+
+`apply` also takes the [ink overlay](#ink-overlays) flags.
 
 ## generate
 
@@ -173,6 +177,23 @@ dith generate <PATTERN> -o <PATH|-> [shared flags] [options]
 | `--stops "#a,#b,..."` | Pattern default. Source colors interpolated in Oklab. |
 
 It also accepts `--no-clobber`, `--dry-run`, `--emit-recipe`, `--save-preset`/`--preset-scope`, `--preview`, and `--view`/`--inline`. The patterns are listed in the [catalog](catalog.md#generators).
+
+**inflate** puffs your own shape up like a pillow and lights it like `sphere`:
+
+| Option | Range / default | Notes |
+| --- | --- | --- |
+| `--shape <svg\|png>` | required, repeatable | Each top-level SVG element (or `<g>`) is one shape; a PNG is one shape. Stretched to the canvas. |
+| `--shape-channel` | `alpha` (default), `luminance`, `darkness` | What marks the filled area. |
+| `--blend <px>` | 0..=512, 0 | Smooth-union width that melts shapes into one body. |
+| `--depth` | 0.05..=4.0, 1.0 | 1.0 inflates a disc to a hemisphere. |
+| `--specular`, `--rim` | 0.0..=2.0, 0.42 and 0.28 | Highlight and rim light, as on `sphere`. |
+| `--ambient` | 0.0..=1.0, 0.08 | Floor brightness; raise it for light, airy drawings. |
+| `--ground-shadow [darkness]` | 0.0..=1.0, 0.35 when given | Soft ellipse under the shape. |
+| `--paint <svg\|png>` | none | Surface tone: darker paint darkens the lit surface (blush, patches). Transparent = unpainted. |
+
+The background is the lightest `--stops` color. `--angle` sets the light direction (135 = top left). `animate inflate` orbits the light like `sphere`; `--cycles 0` keeps it still.
+
+`generate` also takes the [ink overlay](#ink-overlays) flags.
 
 With `--preset`, procedural sources skip the preset's photo preparation (auto-levels, contrast, sharpen) unless you pass those flags explicitly. This also applies to `animate <pattern>`, `compare --pattern`, and `preview --pattern`.
 
@@ -202,14 +223,20 @@ You must pass `-o`, `--frames-dir`, or `--view`. `--pattern <name>` forces proce
 | `--duration <s>` | Mutually exclusive with `--frames`. Frames = s × fps. |
 | `--fps <N>` | 1..=60, default 15. Overrides source GIF timing only when passed. GIF delays round to 10 ms. |
 | `--max-frames <N>` | Cap decoded frames from input GIFs. |
+| `FRAME.png:4200ms`, `FRAME.png:84f` | Per-frame time in a frame sequence: milliseconds, or frames at `--fps`. 10..=65535 ms. Untimed frames use `--fps`. |
+| `--timings <json>` | One time per frame (before ping-pong and holds), e.g. `[4200, 50, "100ms", "1f"]`. Works for every source; not together with `file:time` inputs. |
 | `--reverse`, `--ping-pong` | Ping-pong appends the reversed interior frames. |
-| `--hold-start <N>`, `--hold-end <N>` | Extra dwell frames, added to `frame_count`. |
+| `--hold-start <N>`, `--hold-end <N>` | Extra copies of the first/last frame, each at that frame's own delay, for every source including frame sequences. Added to `frame_count`. To hold one frame for a long time, give it a long time instead. |
+
+APNG stores every delay exactly. GIF stores 10 ms steps with a 20 ms minimum; the report then shows each frame's `encoded_delay_ms` and a `timing_note`.
 
 **Temporal dithering**
 
 | Option | Notes |
 | --- | --- |
-| `--temporal locked\|boil\|grain` | Default `locked`, or `boil` for a single still input. `locked` fixes screen and seed; static pixels stay identical only with per-pixel algorithms (`temporally_stable: true` in `dith list algorithms --json`). Error diffusion still shimmers around motion. |
+| `--temporal locked\|boil\|grain\|locked-diff` | Default `locked`, or `boil` for a single still input. `locked` fixes screen and seed; static pixels stay identical only with per-pixel algorithms (`temporally_stable: true` in `dith list algorithms --json`). Error diffusion still shimmers around motion, unless you use `locked-diff`: every frame is dithered in full, but only pixels near a source change are taken from it and the rest copy the previous output frame. |
+| `--diff-threshold <f>` | `locked-diff` only. Source luminance change (0.0..=1.0) that counts; default 0 = any change. |
+| `--diff-margin <px>` | `locked-diff` only. Grows the changed area (0..=256, default 4), rounded up to whole `--pixel-size` cells. |
 | `--boil-rate <N>` | Update the boil every N frames (2 = on twos). Default 1. |
 | `--boil-amount <f>` | 0.0..=0.5 jitter intensity. |
 | `--screen-drift <dx,dy>` | Per-frame drift of ordered or halftone screens, in cells. |
@@ -235,6 +262,11 @@ You must pass `-o`, `--frames-dir`, or `--view`. `--pattern <name>` forces proce
 
 - `--canvas-width`/`--canvas-height` (defaults 480×360), `--angle`, `--frequency`, `--stops`
 - What each pattern does over time is in `dith list generators --json` (`motion`), and in the [catalog](catalog.md#generators).
+
+**Overlays**
+
+- [Ink overlay](#ink-overlays) flags apply to every frame.
+- `--overlay-frames <dir|a.svg,b.svg,...>`: one overlay per frame (before ping-pong and holds), composited on top. A directory is read in name order. Lets eyes or lettering change while the dithered picture stays put.
 
 **Other**
 
@@ -296,6 +328,31 @@ dith preset delete <name> [--scope project|user | --dir DIR] --json
 - Lookup order: `$DITH_PRESETS_DIR`, then `.dith/presets/`, then `~/.config/dith/presets/`, then built-ins. A local preset with a built-in's name shadows the built-in.
 - From a render, `--save-preset <name> --preset-scope project|user` on `apply` or `generate` saves the resolved settings in one step.
 
+## diff
+
+```sh
+dith diff <A> <B> [-o highlight.png] [--tolerance N] [--dry-run] --json
+dith diff --frames <anim.gif|.apng|.webp|DIR> [--loop] [-o highlight.png] [--tolerance N] --json
+```
+
+- Compares RGBA pixel by pixel; both images must be the same size (`INVALID_ARGUMENT` otherwise). Two fully transparent pixels always match.
+- `--tolerance N` (0..=255) ignores per-channel differences up to N.
+- `-o` writes a PNG that fades the (last) image and paints changed pixels red; with `--frames` it marks every pixel that changes in any frame.
+- `--frames` compares each frame with the one before it; `--loop` also compares the last frame with the first. A directory is read in name order.
+- Exit code 0 whether or not anything changed; read `changed_pixels`.
+
+## Ink overlays
+
+`apply`, `generate` and `animate` composite overlays after dithering, so line work stays exact:
+
+| Option | Notes |
+| --- | --- |
+| `--overlay <svg\|png>` | Repeatable, composited in order. SVGs are rasterized at the output size; PNGs of another size are scaled nearest-neighbour. Every drawn pixel snaps to the nearest palette color, with no dithering and no error diffusion. |
+| `--overlay-color <hex>` | Paint every drawn overlay pixel this color instead (use a palette color for GIF output). |
+| `--overlay-alpha threshold\|dither` | `threshold` (default) draws pixels at least 50% opaque; `dither` screens partial alpha with a 4x4 Bayer matrix. |
+
+Under `--pixel-size N`, whole N x N blocks switch together (from their mean opacity and color), so overlays line up with the chunky pixels. Overlays are stored in recipes as `overlay: {layers, color, alpha}` and omitted when unset; saved presets keep the inking but drop the layer files. A missing or unreadable file fails with `INVALID_ASSET` (exit 2).
+
 ## JSON reports
 
 **apply / generate**
@@ -316,6 +373,12 @@ dith preset delete <name> [--scope project|user | --dir DIR] --json
 - `spritesheet_grid` (spritesheets only)
 - `max_size_bytes`, `size_fit_scale` (only with `--max-size`)
 - `bytes_written`, `elapsed_ms`, `color_usage[]`
+- `frames[]`, each `{index, delay_ms, encoded_delay_ms?, changed_pixels?}` (`encoded_delay_ms` for GIF; `changed_pixels` against the previous frame, 0 for the first, absent on `--dry-run`), `changed_pixels_total`, `timing_note` (GIF rounding)
+
+**diff**
+
+- Two images: `status`, `mode: "images"`, `a`, `b`, `tolerance`, `width`, `height`, `changed_pixels`, `total_pixels`, `changed_percent`, `bbox` (`{x, y, width, height}` or null), `changed_rows` and `changed_columns` (inclusive `[first, last]` runs), `output`
+- Frames: `mode: "frames"`, `source`, `frame_count`, `width`, `height`, `loop`, `unchanged_frames`, `changed_pixels_total`, `frames[]` (`{index, previous, delay_ms, ...}` plus the fields above), and `union` (every pixel that changes in any compared pair)
 
 **compare**
 
@@ -350,7 +413,7 @@ With `--json`, errors are printed to stderr:
 | Exit | Meaning | Typical codes |
 | --- | --- | --- |
 | 0 | Success | |
-| 2 | Invalid flags or values. Fix and retry. | `CLI_USAGE_ERROR` (clap parse error; message lists possible values), `INVALID_ARGUMENT` (out of range, missing `-o`), `UNKNOWN_PRESET` and other unknown-slug codes (with `valid_values`), `OUTPUT_EXISTS` |
+| 2 | Invalid flags or values. Fix and retry. | `CLI_USAGE_ERROR` (clap parse error; message lists possible values), `INVALID_ARGUMENT` (out of range, missing `-o`), `UNKNOWN_PRESET` and other unknown-slug codes (with `valid_values`), `OUTPUT_EXISTS`, `INVALID_ASSET` (overlay, shape or paint file missing or not an image) |
 | 1 | Runtime or I/O failure | `RUNTIME_ERROR` (missing or undecodable input, write failure, batch item failures) |
 
 Without `--json`, errors print as `error [CODE]: message` followed by `hint: suggestion`.

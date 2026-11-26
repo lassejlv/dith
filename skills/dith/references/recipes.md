@@ -81,6 +81,64 @@ Set `--sheet-cols` equal to `--frames` to get a single row, which keeps the CSS 
 @keyframes play { to { background-position: -1536px 0; } }  /* -N*W */
 ```
 
+## Characters and icons
+
+### Custom character icon
+
+A soft, dithered mascot with exact ink line work, drawn from hand-written SVGs only (the repository's `examples/cat-icon/` is this recipe end to end).
+
+1. Write the SVGs on one canvas (here `viewBox="-1 -1 2 2"`, `width`/`height` 512):
+   - `body.svg`: the silhouette's parts as separate filled elements, e.g. a head ellipse and two ears as rounded triangles (a path with `stroke-linejoin="round"` and a stroke in the fill color).
+   - `blush.svg`: soft paint, e.g. two semi-transparent black ellipses through a `feGaussianBlur` filter.
+   - `face.svg`: ink that never changes: nose, mouth, and the outline (the silhouette drawn with a thicker stroke, masked by the silhouette itself so only the outside ring shows).
+   - `eyes-open.svg`, `eyes-half.svg`, `eyes-closed.svg`: one file per eye state.
+2. Render the icon:
+
+```sh
+dith generate inflate -o cat.png \
+  --shape body.svg --blend 24 --paint blush.svg \
+  --angle 135 --ground-shadow --ambient 0.5 --depth 0.6 --specular 0.3 \
+  --stops "#171717,#F5F1EA" --canvas-width 512 --canvas-height 512 \
+  --algorithm atkinson --colors "#F5F1EA,#171717" --pixel-size 2 --bias 0.12 --no-auto-levels \
+  --overlay face.svg --overlay eyes-open.svg --json
+```
+
+3. Animate a blink (4.4 s loop at 20 fps steps). `blink.json` is `[4200, 50, 100, 50]`:
+
+```sh
+dith animate inflate -o cat-blink.gif \
+  --shape body.svg --blend 24 --paint blush.svg \
+  --angle 135 --ground-shadow --ambient 0.5 --depth 0.6 --specular 0.3 \
+  --stops "#171717,#F5F1EA" --canvas-width 512 --canvas-height 512 \
+  --algorithm atkinson --colors "#F5F1EA,#171717" --pixel-size 2 --bias 0.12 --no-auto-levels \
+  --cycles 0 --frames 4 --fps 20 --timings blink.json --temporal locked-diff \
+  --overlay face.svg --overlay-frames eyes-open.svg,eyes-half.svg,eyes-closed.svg,eyes-half.svg --json
+```
+
+4. Prove only the eyes move: `dith diff --frames cat-blink.gif --loop --json`. `union.changed_columns` should be two runs (one per eye) and `union.changed_rows` one run around the eyes.
+
+- `--blend` melts head and ears into one body; 0 keeps a hard crease.
+- Lighter, sparser dots: raise `--ambient` or lower `--depth`. More volume: the reverse.
+- Overlays snap to the `--pixel-size` grid and to the palette, so the eyes' white highlights come out in the paper color.
+- The first GIF frame is byte-identical to `cat.png`, and the GIF only stores the eyes after it (about 7 KB).
+
+### Hold one frame for seconds in a sequence
+
+```sh
+dith animate open.png:4200ms half.png:50ms shut.png:100ms half.png:50ms -o blink.apng \
+  --algorithm atkinson --colors "#F5F1EA,#171717" --temporal locked-diff --json
+```
+
+`:84f` means 84 frames at `--fps`. APNG keeps exact delays; GIF rounds to 10 ms and says so in `timing_note`. With error diffusion, `locked-diff` stops the change from rippling across the picture: compare `changed_pixels_total` against a `--temporal locked` render.
+
+### Check that an edit only touched what it should
+
+```sh
+dith diff before.png after.png -o changes.png --json
+```
+
+Read `changed_pixels`, `bbox`, `changed_rows` and `changed_columns`; `changes.png` shows the changed pixels in red over a faded copy.
+
 ## Animated GIFs and loops
 
 ### Ink-wash dissolve reveal
