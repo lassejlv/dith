@@ -46,6 +46,7 @@ pub mod compare;
 pub mod diff;
 pub mod dither;
 pub mod generate;
+pub mod inflate;
 pub mod ink;
 pub mod input;
 pub mod inspect;

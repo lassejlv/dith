@@ -1465,3 +1465,172 @@ fn ink_overlays_are_exact_snap_to_the_pixel_grid_and_change_per_frame() {
         "{err}"
     );
 }
+
+#[test]
+fn inflate_generator_puffs_svg_shapes_and_validates_its_flags() {
+    let dir = TempDir::new().unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    std::fs::write(
+        path("blob.svg"),
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 64"><circle cx="34" cy="32" r="18"/><circle cx="62" cy="32" r="18"/></svg>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        path("paint.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 64"><circle cx="62" cy="32" r="10" fill="#000"/></svg>"##,
+    )
+    .unwrap();
+    let blob = path("blob.svg");
+    let render = |out: &str, extra: &[&str]| {
+        let mut args = vec![
+            "generate",
+            "inflate",
+            "-o",
+            out,
+            "--shape",
+            &blob,
+            "--canvas-width",
+            "96",
+            "--canvas-height",
+            "64",
+            "--stops",
+            "#000000,#ffffff",
+            "--algorithm",
+            "threshold",
+            "--json",
+        ];
+        args.extend(extra);
+        run_json(&args)
+    };
+    let (ok, _, err) = render(&path("hard.png"), &[]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = render(
+        &path("soft.png"),
+        &[
+            "--blend",
+            "16",
+            "--ground-shadow",
+            "0.9",
+            "--paint",
+            &path("paint.svg"),
+        ],
+    );
+    assert!(ok, "{err}");
+    let hard = image::open(path("hard.png")).unwrap().to_rgba8();
+    let soft = image::open(path("soft.png")).unwrap().to_rgba8();
+    assert_eq!(
+        hard.get_pixel(1, 1).0,
+        [255, 255, 255, 255],
+        "background is the light stop"
+    );
+    assert_eq!(
+        hard.get_pixel(48, 15).0,
+        [255, 255, 255, 255],
+        "hard union leaves the waist open"
+    );
+    assert_eq!(
+        soft.get_pixel(62, 32).0,
+        [0, 0, 0, 255],
+        "paint darkens the surface"
+    );
+    assert_eq!(hard.get_pixel(62, 32).0, [255, 255, 255, 255]);
+    let (ok, again, err) = render(
+        &path("soft2.png"),
+        &[
+            "--blend",
+            "16",
+            "--ground-shadow",
+            "0.9",
+            "--paint",
+            &path("paint.svg"),
+        ],
+    );
+    assert!(ok, "{err}");
+    assert_eq!(again["status"], "ok");
+    assert_eq!(
+        std::fs::read(path("soft.png")).unwrap(),
+        std::fs::read(path("soft2.png")).unwrap()
+    );
+
+    let (ok, _, err) = run_json(&["generate", "inflate", "-o", &path("x.png"), "--json"]);
+    assert!(!ok);
+    assert_eq!(err["code"], "INVALID_ARGUMENT");
+    assert!(
+        err["message"].as_str().unwrap().contains("--shape"),
+        "{err}"
+    );
+    let (ok, _, err) = run_json(&[
+        "generate",
+        "sphere",
+        "-o",
+        &path("x.png"),
+        "--shape",
+        &path("blob.svg"),
+        "--json",
+    ]);
+    assert!(!ok);
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap()
+            .contains("only apply to inflate"),
+        "{err}"
+    );
+    let (ok, _, err) = render(&path("x.png"), &["--depth", "9"]);
+    assert!(!ok);
+    assert!(err["message"].as_str().unwrap().contains("depth"), "{err}");
+    let (ok, _, err) = run_json(&[
+        "generate",
+        "inflate",
+        "-o",
+        &path("x.png"),
+        "--shape",
+        &path("nope.svg"),
+        "--json",
+    ]);
+    assert!(!ok);
+    assert_eq!(err["code"], "INVALID_ASSET");
+
+    let (ok, anim, err) = run_json(&[
+        "animate",
+        "inflate",
+        "-o",
+        &path("orbit.gif"),
+        "--shape",
+        &path("blob.svg"),
+        "--frames",
+        "4",
+        "--canvas-width",
+        "96",
+        "--canvas-height",
+        "64",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    assert!(
+        anim["changed_pixels_total"].as_u64().unwrap() > 0,
+        "the light orbits"
+    );
+    let (ok, still, err) = run_json(&[
+        "animate",
+        "inflate",
+        "-o",
+        &path("still.gif"),
+        "--shape",
+        &path("blob.svg"),
+        "--frames",
+        "4",
+        "--cycles",
+        "0",
+        "--canvas-width",
+        "96",
+        "--canvas-height",
+        "64",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        still["changed_pixels_total"], 0,
+        "--cycles 0 keeps the light still"
+    );
+}
