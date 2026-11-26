@@ -70,8 +70,6 @@ pub(crate) struct Indices<'a> {
     /// because the canvas already shows its color.
     pub optional: &'a [bool],
     pub transparent: u8,
-    /// Which value wins when both allowed values of a pixel continue equally long matches.
-    pub prefer_transparent: bool,
 }
 
 /// Encode a still image as a single-frame GIF with an exact color table, matching what the
@@ -122,7 +120,6 @@ pub(crate) fn encode_still(img: &RgbaImage) -> Option<Vec<u8>> {
         pixels: &indices,
         optional: &[],
         transparent: 0,
-        prefer_transparent: false,
     });
     let frame = Frame {
         left: 0,
@@ -449,17 +446,12 @@ impl Indices<'_> {
         (code, len)
     }
 
-    /// The values pixel `i` may take, preferred one first.
+    /// The values pixel `i` may take: its color, then the transparent index where allowed.
     fn choices(&self, i: usize) -> ([u8; 2], usize) {
-        let color = self.pixels[i];
-        if !self.optional[i] {
-            return ([color, color], 1);
-        }
-        if self.prefer_transparent {
-            ([self.transparent, color], 2)
-        } else {
-            ([color, self.transparent], 2)
-        }
+        (
+            [self.pixels[i], self.transparent],
+            1 + usize::from(self.optional[i]),
+        )
     }
 
     /// Longest table match when some pixels have two allowed values. Every candidate is a table
@@ -591,39 +583,41 @@ mod tests {
         let mut next = xorshift(11);
         let (width, height) = (160u16, 120u16);
         let n = usize::from(width) * usize::from(height);
-        let pixels: Vec<u8> = (0..n).map(|_| (next() % 3) as u8).collect();
-        let optional: Vec<bool> = (0..n).map(|i| i % 160 < 120 && i % 13 != 0).collect();
+        let forced = |i: usize| (i / 160).is_multiple_of(3) && i % 160 < 60;
+        let pixels: Vec<u8> = (0..n)
+            .map(|i| if forced(i) { 3 } else { (next() % 3) as u8 })
+            .collect();
+        let optional: Vec<bool> = (0..n)
+            .map(|i| !forced(i) && i % 160 < 120 && i % 7 != 0)
+            .collect();
+        let (min_code_size, lzw) = compress(&Indices {
+            pixels: &pixels,
+            optional: &optional,
+            transparent: 3,
+        });
+        let frame = Frame {
+            left: 0,
+            top: 0,
+            width,
+            height,
+            delay: 10,
+            disposal: Disposal::Keep,
+            transparent: Some(3),
+            min_code_size,
+            lzw,
+        };
         let palette = [10, 20, 30, 200, 100, 0, 0, 90, 250, 0, 0, 0];
-        for prefer_transparent in [false, true] {
-            let (min_code_size, lzw) = compress(&Indices {
-                pixels: &pixels,
-                optional: &optional,
-                transparent: 3,
-                prefer_transparent,
-            });
-            let frame = Frame {
-                left: 0,
-                top: 0,
-                width,
-                height,
-                delay: 10,
-                disposal: Disposal::Keep,
-                transparent: Some(3),
-                min_code_size,
-                lzw,
-            };
-            let decoded = decode(&write_gif(width, height, &palette, Some(0), &[frame]));
-            let mut transparent = 0;
-            for (i, px) in decoded[0].pixels().enumerate() {
+        let decoded = decode(&write_gif(width, height, &palette, Some(0), &[frame]));
+        let mut chosen = 0;
+        for (i, px) in decoded[0].pixels().enumerate() {
+            if px[3] == 0 {
+                assert!(forced(i) || optional[i], "pixel {i} must keep its color");
+                chosen += usize::from(optional[i]);
+            } else {
                 let c = usize::from(pixels[i]) * 3;
-                if px[3] == 0 {
-                    assert!(optional[i], "pixel {i} must keep its color");
-                    transparent += 1;
-                } else {
-                    assert_eq!(px.0, [palette[c], palette[c + 1], palette[c + 2], 255]);
-                }
+                assert_eq!(px.0, [palette[c], palette[c + 1], palette[c + 2], 255]);
             }
-            assert!(transparent > 0 || !prefer_transparent);
         }
+        assert!(chosen > 0, "transparent never continued a match");
     }
 }
