@@ -115,7 +115,7 @@ fn generate_apply_inspect_compare_and_batch_work_end_to_end() {
     );
     let svg_text = std::fs::read_to_string(&orb_svg).unwrap();
     assert!(svg_text.starts_with("<svg "));
-    assert!(svg_text.contains("a.48.48 0 1 0 .96 0 .48.48 0 1 0-.96 0"));
+    assert!(svg_text.contains("a.48.48 0 10.96 0 .48.48 0 10-.96 0"));
 
     // 4. Dry-run apply validates and plans without writing.
     let dry = dith_bin()

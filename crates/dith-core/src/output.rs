@@ -605,9 +605,9 @@ fn svg_dots(
     skipped: impl Fn(&[u8; 4]) -> bool,
 ) -> String {
     let (left, arcs) = if shape == SvgShape::Circle {
-        (".02", "a.48.48 0 1 0 .96 0 .48.48 0 1 0-.96 0")
+        (".02", "a.48.48 0 10.96 0 .48.48 0 10-.96 0")
     } else {
-        (".12", "a.38.38 0 1 0 .76 0 .38.38 0 1 0-.76 0")
+        (".12", "a.38.38 0 10.76 0 .38.38 0 10-.76 0")
     };
     let mut by_rgb: BTreeMap<[u8; 3], usize> = BTreeMap::new();
     for c in colors.iter().filter(|c| !skipped(c)) {
@@ -1423,7 +1423,7 @@ mod tests {
         img.put_pixel(1, 0, Rgba([0xaa, 0xbb, 0xcc, 255]));
         img.put_pixel(3, 0, Rgba([0xaa, 0xbb, 0xcc, 255]));
         img.put_pixel(0, 2, Rgba([0xaa, 0xbb, 0xcc, 255]));
-        let arcs = "a.48.48 0 1 0 .96 0 .48.48 0 1 0-.96 0";
+        let arcs = "a.48.48 0 10.96 0 .48.48 0 10-.96 0";
         let svg = render_svg(&img, SvgShape::Circle, true);
         assert!(!svg.contains("<rect"), "{svg}");
         assert!(
@@ -1434,7 +1434,7 @@ mod tests {
         );
         let dot = render_svg(&img, SvgShape::Dot, true);
         assert!(
-            dot.contains("d=\"M1.12 .5a.38.38 0 1 0 .76 0 .38.38 0 1 0-.76 0m2 0a.38"),
+            dot.contains("d=\"M1.12 .5a.38.38 0 10.76 0 .38.38 0 10-.76 0m2 0a.38"),
             "{dot}"
         );
     }
