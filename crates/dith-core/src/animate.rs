@@ -26,8 +26,8 @@ use crate::output::{
     ColorUsage, PngLayout, color_histogram, encode_optimized_png_bytes, encode_png_bytes,
     write_output_file,
 };
-use crate::palette::{Palette, extract_adaptive_palette, extract_adaptive_palette_from_frames};
-use crate::preprocess::{finalize_image, prepare_image};
+use crate::palette::{Palette, extract_adaptive_palette, extract_adaptive_palette_from_images};
+use crate::preprocess::{PreparedImage, PreprocessOptions, finalize_image, prepare_image};
 use crate::recipe::{DitherRecipe, PaletteSpec, RecipeError};
 
 /// Parse error for `START..END` sweep ranges or `DX,DY` drift vectors.
@@ -609,11 +609,9 @@ pub fn dither_animation_frames(
     let total = raw_frames.len();
     let source_dimensions = [raw_frames[0].image.width(), raw_frames[0].image.height()];
 
-    // Step 1: build per-frame preprocess options (applying any tonal/pixel-size sweeps) and prepare in parallel.
-    let prepared: Vec<_> = raw_frames
-        .par_iter()
-        .enumerate()
-        .map(|(frame_idx, f)| {
+    // Step 1: build per-frame preprocess options (applying any tonal/pixel-size sweeps).
+    let frame_prep_opts: Vec<PreprocessOptions> = (0..total)
+        .map(|frame_idx| {
             let sweep_t = frame_sweep_t(frame_idx, total, anim_opts);
             let mut prep_opts = recipe.preprocess.clone();
             if let Some(r) = anim_opts.sweep_contrast {
@@ -628,28 +626,49 @@ pub fn dither_animation_frames(
             if let Some(r) = anim_opts.sweep_pixel_size {
                 prep_opts.pixel_size = r.sample(sweep_t).clamp(1, 64);
             }
-            (prepare_image(&f.image, &prep_opts), prep_opts)
+            prep_opts
         })
         .collect();
+
+    // A frame that repeats the previous frame's pixels and settings (every frame of a boiled
+    // still, held frames) shares its prepared image instead of preparing it again.
+    let mut unique_frames: Vec<usize> = Vec::new();
+    let mut prepared_slot: Vec<usize> = Vec::with_capacity(total);
+    for frame_idx in 0..total {
+        let repeats_previous = frame_idx > 0
+            && frame_prep_opts[frame_idx] == frame_prep_opts[frame_idx - 1]
+            && raw_frames[frame_idx].image == raw_frames[frame_idx - 1].image;
+        if !repeats_previous {
+            unique_frames.push(frame_idx);
+        }
+        prepared_slot.push(unique_frames.len() - 1);
+    }
+    let prepared: Vec<PreparedImage> = unique_frames
+        .par_iter()
+        .map(|&frame_idx| prepare_image(&raw_frames[frame_idx].image, &frame_prep_opts[frame_idx]))
+        .collect();
+    let prepared_of = |frame_idx: usize| &prepared[prepared_slot[frame_idx]];
 
     // Step 2: resolve shared global palette (unless --per-frame-palette is explicitly requested).
     let shared_palette = match &recipe.palette {
         PaletteSpec::Adaptive(n) if !anim_opts.per_frame_palette => {
-            let working_imgs: Vec<RgbaImage> =
-                prepared.iter().map(|(p, _)| p.working.clone()).collect();
-            extract_adaptive_palette_from_frames(&working_imgs, *n, recipe.dither.seed)?
+            let working_imgs: Vec<&RgbaImage> = (0..total)
+                .map(|frame_idx| &prepared_of(frame_idx).working)
+                .collect();
+            extract_adaptive_palette_from_images(&working_imgs, *n, recipe.dither.seed)?
         }
-        _ => recipe.resolve_palette(&prepared[0].0.working)?,
+        _ => recipe.resolve_palette(&prepared[0].working)?,
     };
 
     let boil_rate = anim_opts.boil_rate.max(1);
 
     // Step 3: dither and finalize every frame in parallel.
-    let dithered_frames: Result<Vec<AnimFrame>, RecipeError> = prepared
+    let dithered_frames: Result<Vec<AnimFrame>, RecipeError> = raw_frames
         .par_iter()
-        .zip(raw_frames.par_iter())
         .enumerate()
-        .map(|(frame_idx, ((prep, prep_opts), raw))| {
+        .map(|(frame_idx, raw)| {
+            let prep = prepared_of(frame_idx);
+            let prep_opts = &frame_prep_opts[frame_idx];
             let sweep_t = frame_sweep_t(frame_idx, total, anim_opts);
             let mut opts = recipe.dither.clone();
 
