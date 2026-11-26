@@ -123,7 +123,8 @@ pub struct ExportOptions {
     pub view_cols: Option<u32>,
     /// Display height in terminal rows when rendering inline with Kitty graphics (`r=`).
     pub view_rows: Option<u32>,
-    /// Spend extra CPU on the smallest lossless PNG/APNG (palette, filter, and Zopfli search).
+    /// Spend extra CPU on the smallest lossless PNG/APNG (palette, filter, and Zopfli search), and
+    /// on JPEG Huffman tables fitted to the image (the decoded pixels stay the same).
     #[serde(default)]
     pub optimize: bool,
 }
@@ -312,7 +313,13 @@ pub fn encode_image(
             dyn_img
                 .write_to(&mut cursor, img_fmt)
                 .with_context(|| format!("encoding {} output", format.id()))?;
-            Ok(cursor.into_inner())
+            let bytes = cursor.into_inner();
+            Ok(match format {
+                OutputFormat::Jpeg if export.optimize => {
+                    jpeg_with_optimal_huffman(&bytes).unwrap_or(bytes)
+                }
+                _ => bytes,
+            })
         }
     }
 }
@@ -1408,6 +1415,404 @@ fn encode_tiff(img: &RgbaImage) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Rewrite a baseline JPEG from the `image` encoder with Huffman tables built for its own symbol
+/// statistics (ITU T.81 Annex K.2), as a single grayscale component when every chroma block is
+/// zero (a colorless image). The quantized coefficients are untouched, so decoders reconstruct the
+/// same pixels. Returns `None` for streams it does not handle (progressive, restart intervals,
+/// subsampled chroma) or when the rewrite would not be smaller.
+fn jpeg_with_optimal_huffman(jpeg: &[u8]) -> Option<Vec<u8>> {
+    let mut kept: Vec<(u8, &[u8])> = Vec::new();
+    let mut tables: [Option<JpegHuffman>; 8] = Default::default();
+    let mut sof: Option<&[u8]> = None;
+    let mut components: Vec<(u8, u8)> = Vec::new();
+    let mut scan: Vec<(usize, usize, usize)> = Vec::new();
+    if !jpeg.starts_with(&[0xFF, 0xD8]) || !jpeg.ends_with(&[0xFF, 0xD9]) {
+        return None;
+    }
+    let mut at = 2;
+    loop {
+        let &[0xFF, marker, high, low] = jpeg.get(at..at + 4)? else {
+            return None;
+        };
+        let payload = jpeg.get(at + 4..at + 2 + usize::from(u16::from_be_bytes([high, low])))?;
+        at += 2 + payload.len() + 2;
+        match marker {
+            0xC4 => {
+                let mut rest = payload;
+                while let [class_id, counts @ ..] = rest {
+                    let counts: [u8; 16] = counts.get(..16)?.try_into().ok()?;
+                    let n = counts.iter().map(|&c| usize::from(c)).sum::<usize>();
+                    let symbols = rest.get(17..17 + n)?.to_vec();
+                    let (class, id) = (usize::from(class_id >> 4), usize::from(class_id & 15));
+                    *tables.get_mut(id * 2 + class).filter(|_| class < 2)? =
+                        Some(JpegHuffman { counts, symbols });
+                    rest = &rest[17 + n..];
+                }
+            }
+            0xC0 => {
+                let (&[8, _, _, _, _, n], entries) = payload.split_first_chunk::<6>()? else {
+                    return None;
+                };
+                components = entries
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|c| (c[1] == 0x11).then_some((c[0], c[2])))
+                    .collect::<Option<_>>()?;
+                (matches!(n, 1 | 3) && components.len() == usize::from(n)).then_some(())?;
+                sof = Some(payload);
+            }
+            0xDA => {
+                sof?;
+                let (&n, rest) = payload.split_first()?;
+                (usize::from(n) == components.len()
+                    && rest.get(usize::from(n) * 2..)? == [0, 63, 0])
+                .then_some(())?;
+                for selector in rest[..usize::from(n) * 2].as_chunks::<2>().0 {
+                    let component = components.iter().position(|c| c.0 == selector[0])?;
+                    let (dc, ac) = (usize::from(selector[1] >> 4), usize::from(selector[1] & 15));
+                    (dc < 4 && ac < 4).then_some(())?;
+                    scan.push((component, dc * 2, ac * 2 + 1));
+                }
+                break;
+            }
+            0xDB | 0xE0..=0xEF | 0xFE => kept.push((marker, payload)),
+            _ => return None,
+        }
+    }
+    let sof = sof?;
+    let width = usize::from(u16::from_be_bytes([sof[3], sof[4]]));
+    let height = usize::from(u16::from_be_bytes([sof[1], sof[2]]));
+
+    let mut reader = JpegBitReader {
+        data: &jpeg[at..jpeg.len() - 2],
+        ..JpegBitReader::default()
+    };
+    let fast: Vec<Vec<(u8, u8)>> = tables
+        .iter()
+        .map(|table| table.as_ref().map_or_else(Vec::new, JpegHuffman::lookahead))
+        .collect();
+    let mut tokens: Vec<(u8, u8, u16)> = Vec::with_capacity(jpeg.len() * 2);
+    let mut chroma_zero = scan.len() == 3;
+    for _ in 0..width.div_ceil(8) * height.div_ceil(8) {
+        for (i, &(_, dc, ac)) in scan.iter().enumerate() {
+            let first = tokens.len();
+            let (symbol, extra) = reader.decode(tables[dc].as_ref()?, &fast[dc], false)?;
+            (symbol <= 11).then_some(())?;
+            tokens.push(((i << 4 | dc) as u8, symbol, extra));
+            let mut k = 1;
+            while k < 64 {
+                let (symbol, extra) = reader.decode(tables[ac].as_ref()?, &fast[ac], true)?;
+                tokens.push(((i << 4 | ac) as u8, symbol, extra));
+                match (symbol >> 4, symbol & 15) {
+                    (0, 0) => break,
+                    (15, 0) => k += 16,
+                    (_, 0) => return None,
+                    (run, _) => k += usize::from(run) + 1,
+                }
+            }
+            (k <= 64).then_some(())?;
+            chroma_zero &= i == 0 || tokens[first..].iter().all(|t| t.1 == 0);
+        }
+    }
+    let gray = chroma_zero;
+    if gray {
+        tokens.retain(|token| token.0 >> 4 == 0);
+    }
+    let luma = scan[0];
+
+    let mut freq = [[0u32; 256]; 8];
+    for &(table, symbol, _) in &tokens {
+        freq[usize::from(table & 15)][usize::from(symbol)] += 1;
+    }
+    let mut dht = Vec::new();
+    let mut codes = [[(0u8, 0u16); 256]; 8];
+    for (t, freq) in freq.iter().enumerate() {
+        if freq.iter().all(|&f| f == 0) {
+            continue;
+        }
+        let table = JpegHuffman::optimal(freq);
+        dht.push(((t & 1) << 4 | t >> 1) as u8);
+        dht.extend_from_slice(&table.counts);
+        dht.extend_from_slice(&table.symbols);
+        codes[t] = table.codes();
+    }
+
+    let mut out = vec![0xFF, 0xD8];
+    let segment = |out: &mut Vec<u8>, marker: u8, payload: &[u8]| {
+        out.extend_from_slice(&[0xFF, marker]);
+        out.extend_from_slice(&(payload.len() as u16 + 2).to_be_bytes());
+        out.extend_from_slice(payload);
+    };
+    let (luma_id, luma_tq) = components[luma.0];
+    for (marker, payload) in kept {
+        let unused_table = marker == 0xDB && payload.len() == 65 && payload[0] != luma_tq;
+        if !(gray && unused_table) {
+            segment(&mut out, marker, payload);
+        }
+    }
+    if gray {
+        let mut sof = sof[..5].to_vec();
+        sof.extend_from_slice(&[1, luma_id, 0x11, luma_tq]);
+        segment(&mut out, 0xC0, &sof);
+    } else {
+        segment(&mut out, 0xC0, sof);
+    }
+    segment(&mut out, 0xC4, &dht);
+    if gray {
+        let selector = (((luma.1 / 2) << 4) | (luma.2 / 2)) as u8;
+        segment(&mut out, 0xDA, &[1, luma_id, selector, 0, 63, 0]);
+    } else {
+        let mut sos = vec![scan.len() as u8];
+        for &(component, dc, ac) in &scan {
+            sos.extend_from_slice(&[components[component].0, (((dc / 2) << 4) | (ac / 2)) as u8]);
+        }
+        sos.extend_from_slice(&[0, 63, 0]);
+        segment(&mut out, 0xDA, &sos);
+    }
+    let mut writer = JpegBitWriter {
+        out,
+        acc: 0,
+        len: 0,
+    };
+    for (table, symbol, extra) in tokens {
+        let (len, code) = codes[usize::from(table & 15)][usize::from(symbol)];
+        writer.put(u32::from(code), u32::from(len));
+        let extra_len = if table & 1 == 0 { symbol } else { symbol & 15 };
+        writer.put(u32::from(extra), u32::from(extra_len));
+    }
+    let mut out = writer.finish();
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    (out.len() < jpeg.len()).then_some(out)
+}
+
+/// A JPEG Huffman table: how many codes there are of each length 1..=16, and the symbols in code
+/// order.
+#[derive(Debug, Clone, Default)]
+struct JpegHuffman {
+    counts: [u8; 16],
+    symbols: Vec<u8>,
+}
+
+impl JpegHuffman {
+    /// The optimal length-limited table for symbol frequencies `freq`, built as ITU T.81 Annex K.2
+    /// (and libjpeg) do: Huffman merging with a reserved all-ones code, then lengths above 16
+    /// folded back.
+    fn optimal(freq: &[u32; 256]) -> Self {
+        let mut freq: Vec<u64> = freq.iter().map(|&f| u64::from(f)).chain([1]).collect();
+        let mut size = [0usize; 257];
+        let mut next = [usize::MAX; 257];
+        let least = |freq: &[u64], skip: usize| {
+            (0..257)
+                .filter(|&i| i != skip && freq[i] > 0)
+                .fold(None, |best: Option<usize>, i| match best {
+                    Some(b) if freq[b] < freq[i] => Some(b),
+                    _ => Some(i),
+                })
+        };
+        while let Some(mut v1) = least(&freq, usize::MAX)
+            && let Some(mut v2) = least(&freq, v1)
+        {
+            freq[v1] += freq[v2];
+            freq[v2] = 0;
+            size[v1] += 1;
+            while next[v1] != usize::MAX {
+                v1 = next[v1];
+                size[v1] += 1;
+            }
+            next[v1] = v2;
+            size[v2] += 1;
+            while next[v2] != usize::MAX {
+                v2 = next[v2];
+                size[v2] += 1;
+            }
+        }
+        let mut bits = [0usize; 258];
+        for &s in size.iter().filter(|&&s| s > 0) {
+            bits[s] += 1;
+        }
+        for i in (17..258).rev() {
+            while bits[i] > 0 {
+                let mut j = i - 2;
+                while bits[j] == 0 {
+                    j -= 1;
+                }
+                bits[i] -= 2;
+                bits[i - 1] += 1;
+                bits[j + 1] += 2;
+                bits[j] -= 1;
+            }
+        }
+        let longest = (1..=16).rev().find(|&i| bits[i] > 0).unwrap_or(1);
+        bits[longest] -= 1;
+        let mut counts = [0u8; 16];
+        for (count, &bits) in counts.iter_mut().zip(&bits[1..=16]) {
+            *count = bits as u8;
+        }
+        let symbols = (1..258)
+            .flat_map(|len| (0..256).filter(move |&s| size[s] == len))
+            .map(|s| s as u8)
+            .collect();
+        Self { counts, symbols }
+    }
+
+    /// (code length, symbol) for every 9-bit prefix that starts with a code of at most 9 bits, and
+    /// (0, 0) for the rest, so most symbols decode with one lookup.
+    fn lookahead(&self) -> Vec<(u8, u8)> {
+        let mut fast = vec![(0, 0); 512];
+        let mut code = 0usize;
+        let mut symbols = self.symbols.iter();
+        for (len, &count) in (1u8..=9).zip(&self.counts) {
+            for &symbol in symbols.by_ref().take(usize::from(count)) {
+                let span = 1 << (9 - len);
+                fast[code * span..(code + 1) * span].fill((len, symbol));
+                code += 1;
+            }
+            code <<= 1;
+        }
+        fast
+    }
+
+    /// (code length, code) of every symbol, for encoding.
+    fn codes(&self) -> [(u8, u16); 256] {
+        let mut codes = [(0, 0); 256];
+        let mut code = 0u16;
+        let mut symbols = self.symbols.iter();
+        for (len, &count) in (1u8..).zip(&self.counts) {
+            for &symbol in symbols.by_ref().take(usize::from(count)) {
+                codes[usize::from(symbol)] = (len, code);
+                code += 1;
+            }
+            code <<= 1;
+        }
+        codes
+    }
+}
+
+/// Reads bits from JPEG entropy-coded data, removing the `0xFF 0x00` byte stuffing.
+#[derive(Default)]
+struct JpegBitReader<'a> {
+    data: &'a [u8],
+    at: usize,
+    acc: u64,
+    len: u32,
+    padding: u32,
+}
+
+impl JpegBitReader<'_> {
+    fn refill(&mut self) {
+        if self.len > 48 {
+            return;
+        }
+        if let Some(&word) = self
+            .data
+            .get(self.at..)
+            .and_then(|rest| rest.first_chunk::<8>())
+        {
+            let word = u64::from_be_bytes(word);
+            let ones = !word;
+            if ones.wrapping_sub(0x0101_0101_0101_0101) & !ones & 0x8080_8080_8080_8080 == 0 {
+                let bytes = ((64 - self.len) / 8).min(7);
+                self.acc = self.acc << (bytes * 8) | word >> (64 - bytes * 8);
+                self.len += bytes * 8;
+                self.at += bytes as usize;
+                return;
+            }
+        }
+        while self.len <= 48 {
+            let byte = match self.data.get(self.at..) {
+                Some([0xFF, 0x00, ..]) => {
+                    self.at += 2;
+                    0xFF
+                }
+                Some([0xFF, ..] | []) | None => {
+                    self.padding += 8;
+                    0
+                }
+                Some([byte, ..]) => {
+                    self.at += 1;
+                    *byte
+                }
+            };
+            self.acc = self.acc << 8 | u64::from(byte);
+            self.len += 8;
+        }
+    }
+
+    /// The next Huffman-coded symbol of `table` (whose [`JpegHuffman::lookahead`] is `fast`) and the
+    /// extra bits that follow it: as many as the symbol after a DC symbol, its low four bits after
+    /// an AC one. `None` past the end of the data.
+    fn decode(&mut self, table: &JpegHuffman, fast: &[(u8, u8)], ac: bool) -> Option<(u8, u16)> {
+        self.refill();
+        let peek = (self.acc >> (self.len - 16)) as u32 & 0xFFFF;
+        let (len, symbol) = if let Some(&(len @ 1.., symbol)) = fast.get((peek >> 7) as usize) {
+            (len, symbol)
+        } else {
+            let (mut first, mut index) = (0u32, 0usize);
+            let mut found = None;
+            for (len, &count) in (1u8..).zip(&table.counts) {
+                let code = peek >> (16 - u32::from(len));
+                if code < first + u32::from(count) {
+                    found = Some((len, *table.symbols.get(index + (code - first) as usize)?));
+                    break;
+                }
+                index += usize::from(count);
+                first = (first + u32::from(count)) << 1;
+            }
+            found?
+        };
+        let extra = u32::from(if ac { symbol & 15 } else { symbol });
+        let used = u32::from(len) + extra;
+        (extra <= 16 && self.len - used >= self.padding).then_some(())?;
+        self.len -= used;
+        Some((
+            symbol,
+            ((self.acc >> self.len) as u32 & ((1 << extra) - 1)) as u16,
+        ))
+    }
+}
+
+/// Writes JPEG entropy-coded data, stuffing a zero byte after every `0xFF`.
+struct JpegBitWriter {
+    out: Vec<u8>,
+    acc: u64,
+    len: u32,
+}
+
+impl JpegBitWriter {
+    fn put(&mut self, bits: u32, n: u32) {
+        self.acc = self.acc << n | u64::from(bits);
+        self.len += n;
+        if self.len >= 32 {
+            self.len -= 32;
+            self.push_bytes(&((self.acc >> self.len) as u32).to_be_bytes());
+        }
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        if !bytes.contains(&0xFF) {
+            self.out.extend_from_slice(bytes);
+            return;
+        }
+        for &byte in bytes {
+            self.out.push(byte);
+            if byte == 0xFF {
+                self.out.push(0);
+            }
+        }
+    }
+
+    /// Pad the last byte with one bits and return the data.
+    fn finish(mut self) -> Vec<u8> {
+        let pad = (8 - self.len % 8) % 8;
+        self.acc = self.acc << pad | ((1 << pad) - 1);
+        self.len += pad;
+        let tail = (self.acc << (64 - self.len)).to_be_bytes();
+        self.push_bytes(&tail[..(self.len / 8) as usize]);
+        self.out
+    }
+}
+
 /// The most compact exact PNG pixel layout for a set of images (one still, or every animation frame).
 ///
 /// Dithered output almost always uses a handful of colors, so it becomes an indexed PNG at the
@@ -2144,6 +2549,70 @@ mod tests {
             .map(layout)
             .collect();
         assert_eq!(layouts, [(4, 2), (8, 1), (4, 2), (4, 0)]);
+    }
+
+    #[test]
+    fn jpeg_huffman_rewrite_decodes_to_the_same_pixels() {
+        let photo = RgbaImage::from_fn(37, 21, |x, y| {
+            Rgba([(x * 7) as u8, (y * 11) as u8, ((x ^ y) * 5) as u8, 255])
+        });
+        let gray = RgbaImage::from_fn(29, 17, |x, y| {
+            let v = if (x * 3 + y * 5) % 7 < 3 { 0 } else { 255 };
+            Rgba([v, v, v, 255])
+        });
+        let tiny = RgbaImage::from_pixel(1, 1, Rgba([200, 30, 90, 255]));
+        for (img, components) in [(photo, 3), (gray, 1), (tiny, 3)] {
+            let mut baseline = Cursor::new(Vec::new());
+            DynamicImage::ImageRgba8(img.clone())
+                .to_rgb8()
+                .write_to(&mut baseline, ImageFormat::Jpeg)
+                .unwrap();
+            let baseline = baseline.into_inner();
+            let optimize = ExportOptions {
+                optimize: true,
+                ..ExportOptions::default()
+            };
+            assert_eq!(
+                encode_image(&img, OutputFormat::Jpeg, &ExportOptions::default()).unwrap(),
+                baseline
+            );
+            let bytes = encode_image(&img, OutputFormat::Jpeg, &optimize).unwrap();
+            assert!(bytes.len() < baseline.len());
+            assert_eq!(
+                image::load_from_memory(&bytes).unwrap().to_rgba8(),
+                image::load_from_memory(&baseline).unwrap().to_rgba8()
+            );
+            let sof = bytes.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+            assert_eq!(bytes[sof + 9], components);
+        }
+    }
+
+    #[test]
+    fn jpeg_optimal_huffman_codes_stay_within_16_bits() {
+        let mut freq = [0u32; 256];
+        let (mut a, mut b) = (1u32, 1u32);
+        for f in freq.iter_mut().take(40) {
+            *f = a;
+            (a, b) = (b, a + b);
+        }
+        let table = JpegHuffman::optimal(&freq);
+        assert_eq!(table.symbols.len(), 40);
+        let kraft: u32 = (0..16)
+            .map(|i| u32::from(table.counts[i]) << (15 - i))
+            .sum();
+        assert!(kraft < 1 << 16);
+        let codes = table.codes();
+        let used: Vec<(u8, u16)> = table
+            .symbols
+            .iter()
+            .map(|&s| codes[usize::from(s)])
+            .collect();
+        for (i, &(len_a, code_a)) in used.iter().enumerate() {
+            for &(len_b, code_b) in &used[i + 1..] {
+                let len = len_a.min(len_b);
+                assert_ne!(code_a >> (len_a - len), code_b >> (len_b - len));
+            }
+        }
     }
 
     #[test]
