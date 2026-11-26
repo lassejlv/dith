@@ -61,6 +61,7 @@ pub mod resample;
 pub mod svg;
 
 mod deflate;
+mod gif_lzw;
 mod huffman;
 mod nearest;
 mod png_optimize;
