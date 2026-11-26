@@ -265,6 +265,9 @@ pub enum TemporalMode {
     Boil,
     /// Energetic animated newsprint/photocopy stipple grain every frame.
     Grain,
+    /// Locked, and only pixels near a source change are redrawn: everything else keeps the previous
+    /// output frame, so error diffusion cannot ripple a small change across the picture.
+    LockedDiff,
 }
 
 impl TemporalMode {
@@ -274,6 +277,7 @@ impl TemporalMode {
             Self::Locked => "locked",
             Self::Boil => "boil",
             Self::Grain => "grain",
+            Self::LockedDiff => "locked-diff",
         }
     }
 
@@ -288,6 +292,9 @@ impl TemporalMode {
             }
             Self::Grain => {
                 "Lively animated stipple grain every frame (photocopy / punk zine energy)"
+            }
+            Self::LockedDiff => {
+                "Locked, plus each frame only redraws pixels within --diff-margin of a source change (--diff-threshold); everything else is copied from the previous frame, so error-diffusion animations stay still outside what moves"
             }
         }
     }
@@ -372,6 +379,18 @@ pub struct AnimDitherOptions {
     /// own overlays, so eyes or lettering can change while the dithered picture stays put.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overlay_frames: Vec<PathBuf>,
+    /// `locked-diff`: source luminance change (`0.0..=1.0`) a pixel needs to count as changed
+    /// (`0` = any change at all).
+    #[serde(default)]
+    pub diff_threshold: f32,
+    /// `locked-diff`: pixels the changed area grows by before it is redrawn (rounded up to whole
+    /// `pixel_size` cells).
+    #[serde(default = "default_diff_margin")]
+    pub diff_margin: u32,
+}
+
+const fn default_diff_margin() -> u32 {
+    4
 }
 
 impl Default for AnimDitherOptions {
@@ -393,6 +412,8 @@ impl Default for AnimDitherOptions {
             cycle_palette: false,
             per_frame_palette: false,
             overlay_frames: Vec::new(),
+            diff_threshold: 0.0,
+            diff_margin: default_diff_margin(),
         }
     }
 }
@@ -617,6 +638,19 @@ pub fn dither_animation_frames(
         });
     }
 
+    if !(0.0..=1.0).contains(&anim_opts.diff_threshold) {
+        return Err(RecipeError::Validation {
+            field: "diff-threshold",
+            reason: format!("must be in 0.0..=1.0 (got {})", anim_opts.diff_threshold),
+        });
+    }
+    if anim_opts.diff_margin > 256 {
+        return Err(RecipeError::Validation {
+            field: "diff-margin",
+            reason: format!("must be in 0..=256 (got {})", anim_opts.diff_margin),
+        });
+    }
+
     let total = raw_frames.len();
     if !anim_opts.overlay_frames.is_empty() && anim_opts.overlay_frames.len() != total {
         return Err(RecipeError::Validation {
@@ -702,7 +736,7 @@ pub fn dither_animation_frames(
             let boil_tick = (frame_idx as u32) / boil_rate;
             let boil_tick_u64 = u64::from(boil_tick);
             match anim_opts.temporal {
-                TemporalMode::Locked => {}
+                TemporalMode::Locked | TemporalMode::LockedDiff => {}
                 TemporalMode::Boil => {
                     opts.pattern_offset = [boil_tick.wrapping_mul(19), boil_tick.wrapping_mul(31)];
                     opts.seed = opts
@@ -752,7 +786,37 @@ pub fn dither_animation_frames(
             Ok((dithered, frame_palette))
         })
         .collect();
-    let dithered = dithered?;
+    let mut dithered = dithered?;
+
+    if anim_opts.temporal == TemporalMode::LockedDiff {
+        for frame_idx in 1..total {
+            let (done, rest) = dithered.split_at_mut(frame_idx);
+            let previous = &done[frame_idx - 1].0;
+            let current = &mut rest[0].0;
+            let (before, after) = (
+                &prepared_of(frame_idx - 1).working,
+                &prepared_of(frame_idx).working,
+            );
+            if previous.dimensions() != current.dimensions()
+                || before.dimensions() != after.dimensions()
+                || before.dimensions() != current.dimensions()
+            {
+                continue;
+            }
+            let cell = frame_prep_opts[frame_idx].pixel_size.max(1);
+            let mask = source_change_mask(
+                before,
+                after,
+                anim_opts.diff_threshold,
+                anim_opts.diff_margin.div_ceil(cell),
+            );
+            for ((px, &keep_new), &old) in current.pixels_mut().zip(&mask).zip(previous.pixels()) {
+                if !keep_new {
+                    *px = old;
+                }
+            }
+        }
+    }
 
     // Step 4: finalize (alpha, pixel-size upscale) and composite overlays as exact ink.
     let (out_w, out_h) = (prepared[0].final_width, prepared[0].final_height);
@@ -817,6 +881,53 @@ pub fn dither_animation_frames(
         changed_pixels,
         elapsed_ms: started.elapsed().as_millis(),
     })
+}
+
+/// Pixels whose source changed between two prepared frames, grown by `grow` pixels (a square
+/// neighbourhood). With `threshold == 0` any RGBA difference counts; otherwise the luminance (or
+/// alpha) must move by more than `threshold` (`0.0..=1.0`).
+fn source_change_mask(
+    before: &RgbaImage,
+    after: &RgbaImage,
+    threshold: f32,
+    grow: u32,
+) -> Vec<bool> {
+    let luma = |p: &Rgba<u8>| {
+        (0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2])) / 255.0
+    };
+    let changed: Vec<bool> = before
+        .pixels()
+        .zip(after.pixels())
+        .map(|(a, b)| {
+            if threshold <= 0.0 {
+                a != b
+            } else {
+                (luma(a) - luma(b)).abs() > threshold
+                    || f32::from(a[3].abs_diff(b[3])) / 255.0 > threshold
+            }
+        })
+        .collect();
+    let (w, h) = (before.width() as usize, before.height() as usize);
+    let r = grow as usize;
+    if r == 0 {
+        return changed;
+    }
+    // Separable square dilation: rows, then columns.
+    let mut rows = vec![false; w * h];
+    for y in 0..h {
+        let line = &changed[y * w..(y + 1) * w];
+        for x in 0..w {
+            rows[y * w + x] = line[x.saturating_sub(r)..=(x + r).min(w - 1)].contains(&true);
+        }
+    }
+    let mut grown = vec![false; w * h];
+    for x in 0..w {
+        for y in 0..h {
+            grown[y * w + x] =
+                (y.saturating_sub(r)..=(y + r).min(h - 1)).any(|yy| rows[yy * w + x]);
+        }
+    }
+    grown
 }
 
 fn frame_sweep_t(frame_idx: usize, total: usize, opts: &AnimDitherOptions) -> f32 {
@@ -1445,6 +1556,57 @@ mod tests {
                 if temporal == TemporalMode::Locked {
                     assert_eq!(frame.image, anim.frames[0].image, "locked frame {i}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn source_change_mask_honours_threshold_and_margin() {
+        let before = RgbaImage::from_pixel(9, 9, Rgba([100, 100, 100, 255]));
+        let mut after = before.clone();
+        after.put_pixel(4, 4, Rgba([110, 100, 100, 255]));
+        let count = |m: &[bool]| m.iter().filter(|&&c| c).count();
+        assert_eq!(count(&source_change_mask(&before, &after, 0.0, 0)), 1);
+        assert_eq!(count(&source_change_mask(&before, &after, 0.0, 2)), 25);
+        assert_eq!(
+            count(&source_change_mask(&before, &after, 0.05, 2)),
+            0,
+            "tiny luma change"
+        );
+        assert_eq!(count(&source_change_mask(&before, &before, 0.0, 3)), 0);
+    }
+
+    #[test]
+    fn locked_diff_copies_untouched_pixels_from_the_previous_frame() {
+        let gradient = |dot: bool| {
+            let mut img = RgbaImage::from_fn(48, 32, |x, _| {
+                let v = (40 + x * 4) as u8;
+                Rgba([v, v, v, 255])
+            });
+            if dot {
+                img.put_pixel(4, 2, Rgba([0, 0, 0, 255]));
+            }
+            AnimFrame {
+                image: img,
+                delay_ms: 80,
+            }
+        };
+        let raw = vec![gradient(false), gradient(true)];
+        let mut recipe = DitherRecipe::default();
+        recipe.dither.algorithm = crate::dither::Algorithm::FloydSteinberg;
+        let locked = dither_animation_frames(&raw, &recipe, &AnimDitherOptions::default()).unwrap();
+        let opts = AnimDitherOptions {
+            temporal: TemporalMode::LockedDiff,
+            diff_margin: 1,
+            ..AnimDitherOptions::default()
+        };
+        let fixed = dither_animation_frames(&raw, &recipe, &opts).unwrap();
+        assert!(fixed.changed_pixels[1] <= 9, "{:?}", fixed.changed_pixels);
+        assert!(locked.changed_pixels[1] > fixed.changed_pixels[1]);
+        assert_eq!(fixed.frames[0].image, locked.frames[0].image);
+        for (x, y, px) in fixed.frames[1].image.enumerate_pixels() {
+            if x.abs_diff(4) > 1 || y.abs_diff(2) > 1 {
+                assert_eq!(px, fixed.frames[0].image.get_pixel(x, y));
             }
         }
     }

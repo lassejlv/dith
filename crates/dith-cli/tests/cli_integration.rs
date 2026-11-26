@@ -1634,3 +1634,98 @@ fn inflate_generator_puffs_svg_shapes_and_validates_its_flags() {
         "--cycles 0 keeps the light still"
     );
 }
+
+#[test]
+fn locked_diff_keeps_error_diffusion_still_outside_what_moves() {
+    let dir = TempDir::new().unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    let face = |name: &str, eye_ry: f32| {
+        std::fs::write(
+            path(name),
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="-1 -1 2 2"><defs><radialGradient id="g" cx="0.35" cy="0.3" r="0.8"><stop offset="0" stop-color="#eee"/><stop offset="1" stop-color="#555"/></radialGradient></defs><rect x="-1" y="-1" width="2" height="2" fill="#F5F1EA"/><ellipse cx="0" cy="0.1" rx="0.66" ry="0.54" fill="url(#g)"/><ellipse cx="-0.25" cy="0.04" rx="0.075" ry="{eye_ry}" fill="#171717"/><ellipse cx="0.25" cy="0.04" rx="0.075" ry="{eye_ry}" fill="#171717"/></svg>"##
+            ),
+        )
+        .unwrap();
+    };
+    face("open.svg", 0.10);
+    face("shut.svg", 0.012);
+    let run = |temporal: &str, out: &str| {
+        let (ok, report, err) = run_json(&[
+            "animate",
+            &format!("{}:400ms", path("open.svg")),
+            &format!("{}:100ms", path("shut.svg")),
+            "-o",
+            &path(out),
+            "--temporal",
+            temporal,
+            "--algorithm",
+            "atkinson",
+            "--colors",
+            "#F5F1EA,#171717",
+            "--json",
+        ]);
+        assert!(ok, "{err}");
+        let (ok, diff, err) = run_json(&["diff", "--frames", &path(out), "--json"]);
+        assert!(ok, "{err}");
+        (report, diff)
+    };
+    let (locked, locked_frames) = run("locked", "locked.gif");
+    let (fixed, fixed_frames) = run("locked-diff", "fixed.gif");
+    let changed = |r: &Value| r["frames"][1]["changed_pixels"].as_u64().unwrap();
+    assert!(
+        changed(&fixed) * 3 < changed(&locked),
+        "locked-diff {} vs locked {}",
+        changed(&fixed),
+        changed(&locked)
+    );
+    assert_eq!(
+        changed(&fixed),
+        fixed_frames["frames"][0]["changed_pixels"]
+            .as_u64()
+            .unwrap()
+    );
+    // Eyes span x 42..54 and 74..86, y 61..72 at 128px; the default 4px margin may add a little.
+    let bbox = &fixed_frames["union"]["bbox"];
+    let (x, y) = (bbox["x"].as_u64().unwrap(), bbox["y"].as_u64().unwrap());
+    let (w, h) = (
+        bbox["width"].as_u64().unwrap(),
+        bbox["height"].as_u64().unwrap(),
+    );
+    assert!(x >= 37 && x + w <= 91 && y >= 56 && y + h <= 78, "{bbox}");
+    assert!(locked_frames["union"]["bbox"]["height"].as_u64().unwrap() > h);
+    assert!(
+        std::fs::metadata(path("fixed.gif")).unwrap().len()
+            < std::fs::metadata(path("locked.gif")).unwrap().len()
+    );
+
+    let (ok, _, err) = run_json(&[
+        "animate",
+        &path("open.svg"),
+        &path("shut.svg"),
+        "-o",
+        &path("x.gif"),
+        "--diff-margin",
+        "2",
+        "--json",
+    ]);
+    assert!(!ok);
+    assert!(
+        err["message"].as_str().unwrap().contains("locked-diff"),
+        "{err}"
+    );
+    let (ok, _, err) = run_json(&[
+        "animate",
+        &path("open.svg"),
+        &path("shut.svg"),
+        "-o",
+        &path("x.gif"),
+        "--temporal",
+        "locked-diff",
+        "--diff-threshold",
+        "2",
+        "--json",
+    ]);
+    assert!(!ok);
+    assert_eq!(err["code"], "INVALID_ARGUMENT");
+}
