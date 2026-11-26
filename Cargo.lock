@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "dith-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "dith-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
