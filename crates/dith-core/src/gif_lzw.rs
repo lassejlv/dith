@@ -43,6 +43,8 @@ const KEEP_BIAS: u64 = 1075;
 pub(crate) enum Disposal {
     /// Leave the frame in place under the next one.
     Keep = 1,
+    /// Clear the frame's area to transparent.
+    Background = 2,
 }
 
 /// One LZW-compressed image of a GIF.
