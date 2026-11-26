@@ -367,7 +367,7 @@ Under `--pixel-size N`, whole N x N blocks switch together (from their mean opac
 **animate**
 
 - `status`, `dry_run`, `source`, `output`, `frames_dir`, `anim_format`, `temporal`
-- `frame_count`, `fps`, `total_duration_ms`, `loops`
+- `frame_count`, `fps`, `total_duration_ms`, `loops` (`fps` is `null` unless every frame has the same delay and that rate is 1..=60 fps; with per-frame timing read `frames[].delay_ms` and `total_duration_ms`; the text summary then reads `4 frames, 4.40 s, variable timing`)
 - `preset`, `algorithm`, `color_space`, `palette_name`, `palette_colors[]`
 - `source_dimensions`, `frame_dimensions`
 - `spritesheet_grid` (spritesheets only)

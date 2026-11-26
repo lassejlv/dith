@@ -456,13 +456,17 @@ pub fn run_fullscreen_animation_viewer(input: &FullscreenAnimInput<'_>) -> Resul
     let mut needs_redraw = true;
     let mut needs_full_clear = true;
     let mut last_advance = Instant::now();
+    let uniform_timing = input
+        .frames
+        .windows(2)
+        .all(|pair| pair[0].delay_ms == pair[1].delay_ms);
 
     loop {
         let base_delay_ms = input.frames[frame_idx].delay_ms.max(16);
         let eff_delay = Duration::from_millis(
             ((base_delay_ms as f32) / speed_mult)
                 .round()
-                .clamp(16.0, 4000.0) as u64,
+                .clamp(16.0, 65_535.0) as u64,
         );
 
         if needs_redraw {
@@ -488,10 +492,17 @@ pub fn run_fullscreen_animation_viewer(input: &FullscreenAnimInput<'_>) -> Resul
                 fit_to_screen,
             );
 
-            let eff_fps = (1000.0 / eff_delay.as_millis().max(1) as f32).round() as u32;
+            let rate = if uniform_timing {
+                format!(
+                    "{}fps",
+                    (1000.0 / eff_delay.as_millis().max(1) as f32).round() as u32
+                )
+            } else {
+                format!("{}ms", eff_delay.as_millis())
+            };
             let state_icon = if paused { "paused" } else { "playing" };
             let title = format!(
-                "{}  ·  frame {}/{} ({eff_fps}fps, {state_icon})",
+                "{}  ·  frame {}/{} ({rate}, {state_icon})",
                 input.title,
                 frame_idx + 1,
                 total_frames

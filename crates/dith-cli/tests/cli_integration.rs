@@ -1316,6 +1316,80 @@ fn animate_sequences_take_per_frame_times_from_inputs_or_a_timings_file() {
 }
 
 #[test]
+fn animate_summary_and_report_only_claim_an_fps_for_uniform_timing() {
+    let dir = TempDir::new().unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    for (name, shade) in [("a.png", 0u8), ("b.png", 255u8)] {
+        image::RgbaImage::from_pixel(24, 16, image::Rgba([shade, shade, shade, 255]))
+            .save(path(name))
+            .unwrap();
+    }
+    let timed = |name: &str, spec: &str| format!("{}:{spec}", path(name));
+    let summary = |args: &[&str]| {
+        let out = dith_bin().args(args).output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let uniform = [
+        "animate",
+        &path("a.png"),
+        &path("b.png"),
+        "-o",
+        &path("uniform.apng"),
+        "--fps",
+        "10",
+    ];
+    assert!(summary(&uniform).contains("(2 frames @ 10fps, 24x16,"));
+    let (ok, report, err) = run_json(&[&uniform[..], &["--json"]].concat());
+    assert!(ok, "{err}");
+    assert_eq!(report["fps"], 10);
+
+    let variable = [
+        "animate",
+        &timed("a.png", "4200ms"),
+        &timed("b.png", "50ms"),
+        &timed("a.png", "100ms"),
+        &timed("b.png", "50ms"),
+        "-o",
+        &path("blink.apng"),
+        "--fps",
+        "20",
+    ];
+    let text = summary(&variable);
+    assert!(
+        text.contains("(4 frames, 4.40 s, variable timing, 24x16,"),
+        "{text}"
+    );
+    assert!(!text.contains("fps"), "{text}");
+    let (ok, report, err) = run_json(&[&variable[..], &["--json"]].concat());
+    assert!(ok, "{err}");
+    assert_eq!(report["fps"], Value::Null);
+    assert_eq!(report["total_duration_ms"], 4400);
+
+    let text = summary(&[&variable[..], &["--dry-run"]].concat());
+    assert!(
+        text.contains("(4 frames, 4.40 s, variable timing, 24x16,"),
+        "{text}"
+    );
+    let (ok, report, err) = run_json(&[&variable[..], &["--dry-run", "--json"]].concat());
+    assert!(ok, "{err}");
+    assert_eq!(report["fps"], Value::Null);
+
+    std::fs::write(path("slow.json"), "[2000, 2000]").unwrap();
+    let text = summary(&[
+        "animate",
+        &path("a.png"),
+        &path("b.png"),
+        "-o",
+        &path("slow.apng"),
+        "--timings",
+        &path("slow.json"),
+    ]);
+    assert!(text.contains("(2 frames, 4.00 s, 24x16,"), "{text}");
+}
+
+#[test]
 fn ink_overlays_are_exact_snap_to_the_pixel_grid_and_change_per_frame() {
     let dir = TempDir::new().unwrap();
     let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
