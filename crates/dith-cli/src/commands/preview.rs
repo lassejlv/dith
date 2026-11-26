@@ -138,7 +138,10 @@ pub(crate) fn handle_preview(args: &PreviewArgs, as_json: bool) -> Result<()> {
     }
 
     let (source_label, src_img) = match (&args.input, args.pattern) {
-        (Some(path), _) => (path.display().to_string(), load_input_image(path)?),
+        (Some(path), _) => (
+            path.display().to_string(),
+            load_input_image(path, Some(&recipe.preprocess))?,
+        ),
         (None, pat) => {
             let pattern = pat.unwrap_or(Pattern::Sphere);
             let stops = if let Some(spec) = &args.stops {

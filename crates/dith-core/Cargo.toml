@@ -8,7 +8,9 @@ readme.workspace = true
 description = "Dithering engine behind the dith CLI: palettes, dither algorithms, procedural generators, animation, and image encoders."
 
 [features]
+default = ["svg"]
 clap = ["dep:clap"]
+svg = ["dep:resvg"]
 
 [dependencies]
 anyhow.workspace = true
@@ -18,6 +20,7 @@ gif.workspace = true
 image.workspace = true
 png.workspace = true
 rayon.workspace = true
+resvg = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

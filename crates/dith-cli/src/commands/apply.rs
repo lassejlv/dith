@@ -3,7 +3,7 @@
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args;
 
 use crate::cli::DitherFlags;
@@ -90,8 +90,7 @@ pub(crate) fn handle_apply(args: &ApplyArgs, as_json: bool) -> Result<()> {
         let (src_w, src_h) = if reading_stdin {
             (0, 0)
         } else {
-            image::image_dimensions(&args.input)
-                .with_context(|| format!("reading dimensions of '{}'", args.input.display()))?
+            dith_core::input::image_dimensions(&args.input)?
         };
         let (out_w, out_h) = if src_w > 0 && src_h > 0 {
             plan_dimensions(src_w, src_h, &recipe.preprocess)
@@ -142,7 +141,7 @@ pub(crate) fn handle_apply(args: &ApplyArgs, as_json: bool) -> Result<()> {
         None
     };
 
-    let src_img = load_input_image(&args.input)?;
+    let src_img = load_input_image(&args.input, Some(&recipe.preprocess))?;
     let interactive_fullscreen = wants_fullscreen && !as_json && io::stdout().is_terminal();
     // Only the fullscreen viewer shows the source again; otherwise the pipeline can consume it.
     let (output_data, raw_source) = if interactive_fullscreen {

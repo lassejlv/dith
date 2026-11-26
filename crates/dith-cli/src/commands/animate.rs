@@ -3,7 +3,7 @@
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 
@@ -428,13 +428,11 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
                 (w, h, requested_frames)
             }
             AnimateSource::Gif(p) | AnimateSource::StaticBoil(p) => {
-                let (w, h) = image::image_dimensions(p)
-                    .with_context(|| format!("reading dimensions of '{}'", p.display()))?;
+                let (w, h) = dith_core::input::image_dimensions(p)?;
                 (w, h, requested_frames)
             }
             AnimateSource::Sequence(list) => {
-                let (w, h) = image::image_dimensions(&list[0])
-                    .with_context(|| format!("reading dimensions of '{}'", list[0].display()))?;
+                let (w, h) = dith_core::input::image_dimensions(&list[0])?;
                 (w, h, list.len())
             }
         };
@@ -755,7 +753,7 @@ fn load_source_frames(
             decoded
         }
         AnimateSource::StaticBoil(path) => {
-            let img = load_input_image(&path)?;
+            let img = load_input_image(&path, Some(&recipe.preprocess))?;
             (0..requested_frames)
                 .map(|_| AnimFrame {
                     image: img.clone(),
@@ -767,7 +765,7 @@ fn load_source_frames(
             let mut loaded = paths
                 .iter()
                 .map(|p| {
-                    let img = load_input_image(p)?;
+                    let img = load_input_image(p, Some(&recipe.preprocess))?;
                     Ok(AnimFrame {
                         image: img,
                         delay_ms,

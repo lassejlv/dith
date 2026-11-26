@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use image::GenericImageView;
 use serde::Serialize;
 
 use crate::color::Rgb;
@@ -43,11 +42,14 @@ pub struct DitherRecommendation {
 /// # Errors
 /// Returns an error if the image cannot be opened or decoded.
 pub fn inspect_image(path: &Path, dominant_count: usize) -> Result<ImageInspection> {
-    let dyn_img = image::open(path)
-        .with_context(|| format!("opening image '{}' for inspection", path.display()))?;
-    let color_type = format!("{:?}", dyn_img.color());
-    let (width, height) = dyn_img.dimensions();
-    let rgba = dyn_img.to_rgba8();
+    let (color_type, rgba) = if crate::input::is_svg_path(path) {
+        ("Svg".to_string(), crate::input::load_image(path, None)?)
+    } else {
+        let dyn_img = image::open(path)
+            .with_context(|| format!("opening image '{}' for inspection", path.display()))?;
+        (format!("{:?}", dyn_img.color()), dyn_img.to_rgba8())
+    };
+    let (width, height) = rgba.dimensions();
 
     let total = u64::from(width) * u64::from(height);
     let mut transparent = 0u64;

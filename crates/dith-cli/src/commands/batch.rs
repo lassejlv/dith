@@ -94,10 +94,12 @@ pub(crate) fn handle_batch(args: &BatchArgs, as_json: bool) -> Result<()> {
             }
 
             if args.dry_run {
-                let dims = image::image_dimensions(input).ok().map(|(w, h)| {
-                    let (ow, oh) = plan_dimensions(w, h, &recipe.preprocess);
-                    [ow, oh]
-                });
+                let dims = dith_core::input::image_dimensions(input)
+                    .ok()
+                    .map(|(w, h)| {
+                        let (ow, oh) = plan_dimensions(w, h, &recipe.preprocess);
+                        [ow, oh]
+                    });
                 return BatchItemReport {
                     input: input.display().to_string(),
                     output: out_path.display().to_string(),
@@ -110,7 +112,7 @@ pub(crate) fn handle_batch(args: &BatchArgs, as_json: bool) -> Result<()> {
             }
 
             let process = || -> Result<([u32; 2], usize, u128)> {
-                let img = load_input_image(input)?;
+                let img = load_input_image(input, Some(&recipe.preprocess))?;
                 let out = run_pipeline_owned(img, &recipe)?;
                 let bytes = encode_image(&out.image, format, &recipe.export)?;
                 write_output_file(&out_path, &bytes)?;

@@ -8,9 +8,11 @@ use image::RgbaImage;
 use serde::Serialize;
 
 use dith_core::color::ColorSpace;
+use dith_core::input::{decode_image_bytes, load_image};
 use dith_core::output::{
     ColorUsage, ExportOptions, KittyOptions, OutputFormat, render_kitty, write_output_file,
 };
+use dith_core::preprocess::PreprocessOptions;
 use dith_core::recipe::{DitherRecipe, PaletteSpec, RecipeError};
 
 /// Structured result emitted for `apply` and `generate`.
@@ -42,18 +44,16 @@ pub(crate) struct RenderReport {
     pub(crate) recipe: Option<DitherRecipe>,
 }
 
-pub(crate) fn load_input_image(path: &Path) -> Result<RgbaImage> {
+/// Load an input image (or '-' for stdin). SVG input is rasterized at the size `plan` asks for.
+pub(crate) fn load_input_image(path: &Path, plan: Option<&PreprocessOptions>) -> Result<RgbaImage> {
     if path.as_os_str() == "-" {
         let mut buf = Vec::new();
         io::stdin()
             .read_to_end(&mut buf)
             .context("reading input image bytes from stdin")?;
-        let img = image::load_from_memory(&buf).context("decoding input image from stdin")?;
-        Ok(img.into_rgba8())
+        decode_image_bytes(&buf, plan).context("decoding input image from stdin")
     } else {
-        let img = image::open(path)
-            .with_context(|| format!("opening input image '{}'", path.display()))?;
-        Ok(img.into_rgba8())
+        load_image(path, plan)
     }
 }
 
