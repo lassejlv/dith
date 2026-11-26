@@ -111,6 +111,11 @@ impl BitWriter {
         }
     }
 
+    /// Number of bits written so far.
+    pub(crate) fn bit_len(&self) -> u64 {
+        self.bytes.len() as u64 * 8 + u64::from(self.pending_bits)
+    }
+
     /// Pad with zero bits to the next byte boundary.
     pub(crate) fn align(&mut self) {
         while self.pending_bits >= 8 {
