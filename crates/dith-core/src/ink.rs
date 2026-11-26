@@ -64,7 +64,11 @@ impl InkMasks {
     pub fn compute(img: &RgbaImage, settings: &SolidInk) -> Self {
         let w = img.width() as usize;
         let h = img.height() as usize;
-        let luma: Vec<u8> = img.pixels().map(|&px| luma_u8(px)).collect();
+        let luma: Vec<u8> = img
+            .as_raw()
+            .par_chunks(4)
+            .map(|px| luma_u8(Rgba([px[0], px[1], px[2], px[3]])))
+            .collect();
 
         let mut ink = match settings.ink_below {
             Some(t) if t > 0.0 => luma.iter().map(|&l| f32::from(l) < t * 255.0).collect(),
@@ -100,21 +104,39 @@ pub fn apply_solid_ink(
     }
     let masks = InkMasks::compute(source, settings);
     let (ink_color, paper_color) = ink_and_paper(palette);
-    for ((px, &is_ink), &is_paper) in dithered.pixels_mut().zip(&masks.ink).zip(&masks.paper) {
-        if px[3] == 0 {
-            continue;
-        }
-        let color = if is_ink {
-            ink_color
-        } else if is_paper {
-            paper_color
-        } else {
-            continue;
-        };
-        px[0] = color.r;
-        px[1] = color.g;
-        px[2] = color.b;
-    }
+    let width = dithered.width() as usize;
+    dithered
+        .as_mut()
+        .par_chunks_mut(width * 4)
+        .zip(
+            masks
+                .ink
+                .par_chunks(width)
+                .zip(masks.paper.par_chunks(width)),
+        )
+        .for_each(|(row, (ink_row, paper_row))| {
+            for ((px, &is_ink), &is_paper) in row
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(ink_row)
+                .zip(paper_row)
+            {
+                if px[3] == 0 {
+                    continue;
+                }
+                let color = if is_ink {
+                    ink_color
+                } else if is_paper {
+                    paper_color
+                } else {
+                    continue;
+                };
+                px[0] = color.r;
+                px[1] = color.g;
+                px[2] = color.b;
+            }
+        });
 }
 
 /// The darkest and lightest palette colors by Oklab lightness.
@@ -142,15 +164,51 @@ fn luma_u8(px: Rgba<u8>) -> u8 {
 
 /// Pixels whose Gaussian-blurred surroundings are brighter than themselves by more than a
 /// threshold that falls from 40/255 (sensitivity near 0) to 8/255 (sensitivity 1).
+///
+/// The blur is separable and clamp-to-edge in integer fixed point: the horizontal pass weighs
+/// luminance by weights summing to [`FIXED_ONE`] (at most `255 * FIXED_ONE`, so it fits a
+/// `u32`), and the vertical pass weighs those sums again and rounds back to one factor of
+/// [`FIXED_ONE`]. Each output row is blurred and thresholded on its own.
 fn outline_mask(luma: &[u8], w: usize, h: usize, sensitivity: f32) -> Vec<bool> {
     let sigma = (3.0 * w.max(h) as f64 / REFERENCE_LONG_SIDE).max(1.0);
-    let blurred = gaussian_blur_fixed(luma, w, h, &gaussian_kernel(sigma));
+    let kernel = gaussian_kernel(sigma);
+    let radius = kernel.len() / 2;
     let threshold = 40.0 - 32.0 * f64::from(sensitivity.clamp(0.0, 1.0));
     let threshold_fixed = (threshold * FIXED_ONE as f64).round() as u64;
-    luma.iter()
-        .zip(&blurred)
-        .map(|(&l, &b)| b > u64::from(l) * FIXED_ONE + threshold_fixed)
-        .collect()
+
+    let mut horizontal = vec![0u32; w * h];
+    horizontal
+        .par_chunks_mut(w)
+        .zip(luma.par_chunks(w))
+        .for_each(|(dst, row)| {
+            for (x, out) in dst.iter_mut().enumerate() {
+                let sum: u64 = kernel
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &wt)| wt * u64::from(row[(x + k).saturating_sub(radius).min(w - 1)]))
+                    .sum();
+                *out = sum as u32;
+            }
+        });
+
+    let mut mask = vec![false; w * h];
+    mask.par_chunks_mut(w).enumerate().for_each_init(
+        || vec![0u64; w],
+        |sums, (y, dst)| {
+            sums.fill(0);
+            for (k, &wt) in kernel.iter().enumerate() {
+                let src = &horizontal[(y + k).saturating_sub(radius).min(h - 1) * w..][..w];
+                for (sum, &v) in sums.iter_mut().zip(src) {
+                    *sum += wt * u64::from(v);
+                }
+            }
+            for ((out, &sum), &l) in dst.iter_mut().zip(sums.iter()).zip(&luma[y * w..][..w]) {
+                let blurred = (sum + FIXED_ONE / 2) / FIXED_ONE;
+                *out = blurred > u64::from(l) * FIXED_ONE + threshold_fixed;
+            }
+        },
+    );
+    mask
 }
 
 /// Integer Gaussian weights summing exactly to [`FIXED_ONE`].
@@ -170,52 +228,23 @@ fn gaussian_kernel(sigma: f64) -> Vec<u64> {
     weights
 }
 
-/// Separable clamp-to-edge Gaussian blur returning luminance scaled by [`FIXED_ONE`].
-fn gaussian_blur_fixed(luma: &[u8], w: usize, h: usize, kernel: &[u64]) -> Vec<u64> {
-    let radius = kernel.len() / 2;
-    let mut horizontal = vec![0u64; w * h];
-    horizontal
-        .par_chunks_mut(w)
-        .zip(luma.par_chunks(w))
-        .for_each(|(dst, row)| {
-            for (x, out) in dst.iter_mut().enumerate() {
-                *out = kernel
-                    .iter()
-                    .enumerate()
-                    .map(|(k, &wt)| wt * u64::from(row[(x + k).saturating_sub(radius).min(w - 1)]))
-                    .sum();
-            }
-        });
-
-    let mut blurred = vec![0u64; w * h];
-    blurred.par_chunks_mut(w).enumerate().for_each(|(y, dst)| {
-        for (x, out) in dst.iter_mut().enumerate() {
-            let sum: u64 = kernel
-                .iter()
-                .enumerate()
-                .map(|(k, &wt)| wt * horizontal[(y + k).saturating_sub(radius).min(h - 1) * w + x])
-                .sum();
-            *out = (sum + FIXED_ONE / 2) / FIXED_ONE;
-        }
-    });
-    blurred
-}
-
 /// 3x3 clamp-to-edge median of a binary mask: set where at least 5 of the 9 cells are set.
 fn median3(mask: &[bool], w: usize, h: usize) -> Vec<bool> {
     let mut out = vec![false; w * h];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, dst)| {
-        let rows = [y.saturating_sub(1), y, (y + 1).min(h - 1)];
-        for (x, out) in dst.iter_mut().enumerate() {
-            let cols = [x.saturating_sub(1), x, (x + 1).min(w - 1)];
-            let set = rows
-                .iter()
-                .flat_map(|&ry| cols.iter().map(move |&cx| mask[ry * w + cx]))
-                .filter(|&v| v)
-                .count();
-            *out = set >= 5;
-        }
-    });
+    out.par_chunks_mut(w).enumerate().for_each_init(
+        || vec![0u8; w],
+        |columns, (y, dst)| {
+            // Set cells per column over the three clamped rows (an edge row counts twice).
+            let rows = [y.saturating_sub(1), y, (y + 1).min(h - 1)].map(|r| &mask[r * w..][..w]);
+            for (x, count) in columns.iter_mut().enumerate() {
+                *count = u8::from(rows[0][x]) + u8::from(rows[1][x]) + u8::from(rows[2][x]);
+            }
+            for (x, out) in dst.iter_mut().enumerate() {
+                let set = columns[x.saturating_sub(1)] + columns[x] + columns[(x + 1).min(w - 1)];
+                *out = set >= 5;
+            }
+        },
+    );
     out
 }
 
