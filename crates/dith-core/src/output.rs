@@ -1150,11 +1150,6 @@ fn encode_indexed_bmp(img: &RgbaImage, palette: &[[u8; 4]]) -> Vec<u8> {
         3..=16 => 4,
         _ => 8,
     };
-    let lookup: HashMap<[u8; 4], u8> = palette
-        .iter()
-        .enumerate()
-        .map(|(i, &c)| (c, i as u8))
-        .collect();
     let width = img.width() as usize;
     let per_byte = 8 / depth;
     let row_len = width.div_ceil(per_byte).next_multiple_of(4);
@@ -1179,12 +1174,11 @@ fn encode_indexed_bmp(img: &RgbaImage, palette: &[[u8; 4]]) -> Vec<u8> {
     for c in palette {
         out.extend_from_slice(&[c[2], c[1], c[0], 0]);
     }
-    let (pixels, _) = img.as_raw().as_chunks::<4>();
-    for row in pixels.chunks(width.max(1)).rev() {
+    for row in palette_indices(img, palette).chunks(width.max(1)).rev() {
         let start = out.len();
         out.resize(start + row_len, 0);
-        for (x, px) in row.iter().enumerate() {
-            out[start + x / per_byte] |= lookup[px] << (8 - depth * (x % per_byte + 1));
+        for (x, &index) in row.iter().enumerate() {
+            out[start + x / per_byte] |= index << (8 - depth * (x % per_byte + 1));
         }
     }
     out
