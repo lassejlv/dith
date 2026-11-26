@@ -438,14 +438,72 @@ impl Default for DitherOptions {
 #[must_use]
 pub fn dither_image(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) -> RgbaImage {
     let mut out = match opts.algorithm {
-        Algorithm::FloydSteinberg => diffuse_kernel(img, palette, opts, &FLOYD_STEINBERG, 16.0),
-        Algorithm::Atkinson => diffuse_kernel(img, palette, opts, &ATKINSON, 8.0),
-        Algorithm::JarvisJudiceNinke => diffuse_kernel(img, palette, opts, &JJN, 48.0),
-        Algorithm::Stucki => diffuse_kernel(img, palette, opts, &STUCKI, 42.0),
-        Algorithm::Burkes => diffuse_kernel(img, palette, opts, &BURKES, 32.0),
-        Algorithm::Sierra => diffuse_kernel(img, palette, opts, &SIERRA, 32.0),
-        Algorithm::SierraTwoRow => diffuse_kernel(img, palette, opts, &SIERRA_TWO_ROW, 16.0),
-        Algorithm::SierraLite => diffuse_kernel(img, palette, opts, &SIERRA_LITE, 4.0),
+        Algorithm::FloydSteinberg => diffuse_kernel(
+            img,
+            palette,
+            opts,
+            [7.0],
+            [(-1, 3.0), (0, 5.0), (1, 1.0)],
+            [],
+            16.0,
+        ),
+        Algorithm::Atkinson => diffuse_kernel(
+            img,
+            palette,
+            opts,
+            [1.0, 1.0],
+            [(-1, 1.0), (0, 1.0), (1, 1.0)],
+            [(0, 1.0)],
+            8.0,
+        ),
+        Algorithm::JarvisJudiceNinke => diffuse_kernel(
+            img,
+            palette,
+            opts,
+            [7.0, 5.0],
+            [(-2, 3.0), (-1, 5.0), (0, 7.0), (1, 5.0), (2, 3.0)],
+            [(-2, 1.0), (-1, 3.0), (0, 5.0), (1, 3.0), (2, 1.0)],
+            48.0,
+        ),
+        Algorithm::Stucki => diffuse_kernel(
+            img,
+            palette,
+            opts,
+            [8.0, 4.0],
+            [(-2, 2.0), (-1, 4.0), (0, 8.0), (1, 4.0), (2, 2.0)],
+            [(-2, 1.0), (-1, 2.0), (0, 4.0), (1, 2.0), (2, 1.0)],
+            42.0,
+        ),
+        Algorithm::Burkes => diffuse_kernel(
+            img,
+            palette,
+            opts,
+            [8.0, 4.0],
+            [(-2, 2.0), (-1, 4.0), (0, 8.0), (1, 4.0), (2, 2.0)],
+            [],
+            32.0,
+        ),
+        Algorithm::Sierra => diffuse_kernel(
+            img,
+            palette,
+            opts,
+            [5.0, 3.0],
+            [(-2, 2.0), (-1, 4.0), (0, 5.0), (1, 4.0), (2, 2.0)],
+            [(-1, 2.0), (0, 3.0), (1, 2.0)],
+            32.0,
+        ),
+        Algorithm::SierraTwoRow => diffuse_kernel(
+            img,
+            palette,
+            opts,
+            [4.0, 3.0],
+            [(-2, 1.0), (-1, 2.0), (0, 3.0), (1, 2.0), (2, 1.0)],
+            [],
+            16.0,
+        ),
+        Algorithm::SierraLite => {
+            diffuse_kernel(img, palette, opts, [2.0], [(-1, 1.0), (0, 1.0)], [], 4.0)
+        }
         Algorithm::Ostromoukhov => diffuse_ostromoukhov(img, palette, opts),
         Algorithm::Bayer2 => ordered_dither(img, palette, opts, &bayer_matrix(2), 2),
         Algorithm::Bayer4 => ordered_dither(img, palette, opts, &bayer_matrix(4), 4),
@@ -466,341 +524,6 @@ pub fn dither_image(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) ->
     apply_solid_ink(img, &mut out, palette, &opts.ink);
     out
 }
-
-struct DiffusionTap {
-    dx: i32,
-    dy: i32,
-    weight: f32,
-}
-
-const FLOYD_STEINBERG: [DiffusionTap; 4] = [
-    DiffusionTap {
-        dx: 1,
-        dy: 0,
-        weight: 7.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 1,
-        weight: 3.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 1,
-        weight: 5.0,
-    },
-    DiffusionTap {
-        dx: 1,
-        dy: 1,
-        weight: 1.0,
-    },
-];
-
-const ATKINSON: [DiffusionTap; 6] = [
-    DiffusionTap {
-        dx: 1,
-        dy: 0,
-        weight: 1.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 0,
-        weight: 1.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 1,
-        weight: 1.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 1,
-        weight: 1.0,
-    },
-    DiffusionTap {
-        dx: 1,
-        dy: 1,
-        weight: 1.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 2,
-        weight: 1.0,
-    },
-];
-
-const JJN: [DiffusionTap; 12] = [
-    DiffusionTap {
-        dx: 1,
-        dy: 0,
-        weight: 7.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 0,
-        weight: 5.0,
-    },
-    DiffusionTap {
-        dx: -2,
-        dy: 1,
-        weight: 3.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 1,
-        weight: 5.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 1,
-        weight: 7.0,
-    },
-    DiffusionTap {
-        dx: 1,
-        dy: 1,
-        weight: 5.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 1,
-        weight: 3.0,
-    },
-    DiffusionTap {
-        dx: -2,
-        dy: 2,
-        weight: 1.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 2,
-        weight: 3.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 2,
-        weight: 5.0,
-    },
-    DiffusionTap {
-        dx: 1,
-        dy: 2,
-        weight: 3.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 2,
-        weight: 1.0,
-    },
-];
-
-const STUCKI: [DiffusionTap; 12] = [
-    DiffusionTap {
-        dx: 1,
-        dy: 0,
-        weight: 8.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 0,
-        weight: 4.0,
-    },
-    DiffusionTap {
-        dx: -2,
-        dy: 1,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 1,
-        weight: 4.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 1,
-        weight: 8.0,
-    },
-    DiffusionTap {
-        dx: 1,
-        dy: 1,
-        weight: 4.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 1,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: -2,
-        dy: 2,
-        weight: 1.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 2,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 2,
-        weight: 4.0,
-    },
-    DiffusionTap {
-        dx: 1,
-        dy: 2,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 2,
-        weight: 1.0,
-    },
-];
-
-const BURKES: [DiffusionTap; 7] = [
-    DiffusionTap {
-        dx: 1,
-        dy: 0,
-        weight: 8.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 0,
-        weight: 4.0,
-    },
-    DiffusionTap {
-        dx: -2,
-        dy: 1,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 1,
-        weight: 4.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 1,
-        weight: 8.0,
-    },
-    DiffusionTap {
-        dx: 1,
-        dy: 1,
-        weight: 4.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 1,
-        weight: 2.0,
-    },
-];
-
-const SIERRA: [DiffusionTap; 10] = [
-    DiffusionTap {
-        dx: 1,
-        dy: 0,
-        weight: 5.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 0,
-        weight: 3.0,
-    },
-    DiffusionTap {
-        dx: -2,
-        dy: 1,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 1,
-        weight: 4.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 1,
-        weight: 5.0,
-    },
-    DiffusionTap {
-        dx: 1,
-        dy: 1,
-        weight: 4.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 1,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 2,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 2,
-        weight: 3.0,
-    },
-    DiffusionTap {
-        dx: 1,
-        dy: 2,
-        weight: 2.0,
-    },
-];
-
-const SIERRA_TWO_ROW: [DiffusionTap; 7] = [
-    DiffusionTap {
-        dx: 1,
-        dy: 0,
-        weight: 4.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 0,
-        weight: 3.0,
-    },
-    DiffusionTap {
-        dx: -2,
-        dy: 1,
-        weight: 1.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 1,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 1,
-        weight: 3.0,
-    },
-    DiffusionTap {
-        dx: 1,
-        dy: 1,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: 2,
-        dy: 1,
-        weight: 1.0,
-    },
-];
-
-const SIERRA_LITE: [DiffusionTap; 3] = [
-    DiffusionTap {
-        dx: 1,
-        dy: 0,
-        weight: 2.0,
-    },
-    DiffusionTap {
-        dx: -1,
-        dy: 1,
-        weight: 1.0,
-    },
-    DiffusionTap {
-        dx: 0,
-        dy: 1,
-        weight: 1.0,
-    },
-];
 
 fn pixel_to_work(px: Rgba<u8>, space: ColorSpace) -> [f32; 3] {
     match space {
@@ -824,28 +547,88 @@ fn palette_work_color(palette: &Palette, idx: usize, space: ColorSpace) -> [f32;
     }
 }
 
-fn diffuse_kernel(
+/// Columns of padding on each side of a diffusion row, so that taps near the image edge land in
+/// cells nothing reads instead of needing a bounds test per tap.
+const ROW_PAD: usize = 2;
+
+/// The three rows that error diffusion can still reach: the working-space value of every pixel
+/// plus the error diffused into it so far. Rows enter as the scan approaches and each cell
+/// receives its additions in the same order as with a whole-image buffer, so the sums are
+/// bit-identical while the memory in play stays a few kilobytes.
+struct DiffusionRows<'a> {
+    src: &'a [u8],
+    width: usize,
+    space: ColorSpace,
+    current: Vec<[f32; 3]>,
+    next: Vec<[f32; 3]>,
+    after: Vec<[f32; 3]>,
+}
+
+impl<'a> DiffusionRows<'a> {
+    fn new(img: &'a RgbaImage, space: ColorSpace) -> Self {
+        let width = img.width() as usize;
+        let mut rows = Self {
+            src: img.as_raw(),
+            width,
+            space,
+            current: vec![[0.0; 3]; width + 2 * ROW_PAD],
+            next: vec![[0.0; 3]; width + 2 * ROW_PAD],
+            after: vec![[0.0; 3]; width + 2 * ROW_PAD],
+        };
+        Self::load(rows.src, width, space, 0, &mut rows.current);
+        Self::load(rows.src, width, space, 1, &mut rows.next);
+        rows
+    }
+
+    /// Reset `row` to the working-space values of source row `y`; past the last row it is left
+    /// as a scratch target.
+    fn load(src: &[u8], width: usize, space: ColorSpace, y: usize, row: &mut [[f32; 3]]) {
+        let Some(pixels) = src.get(y * width * 4..(y + 1) * width * 4) else {
+            return;
+        };
+        row.fill([0.0; 3]);
+        for (cell, px) in row[ROW_PAD..].iter_mut().zip(pixels.as_chunks::<4>().0) {
+            *cell = pixel_to_work(Rgba(*px), space);
+        }
+    }
+
+    /// Bring in row `y + 2` before row `y` is diffused.
+    fn begin_row(&mut self, y: usize) {
+        Self::load(self.src, self.width, self.space, y + 2, &mut self.after);
+    }
+
+    /// Row `y` is finished: the next row becomes current.
+    fn end_row(&mut self) {
+        std::mem::swap(&mut self.current, &mut self.next);
+        std::mem::swap(&mut self.next, &mut self.after);
+    }
+}
+
+#[inline]
+fn add_error(cell: &mut [f32; 3], err: [f32; 3], factor: f32) {
+    cell[0] += err[0] * factor;
+    cell[1] += err[1] * factor;
+    cell[2] += err[2] * factor;
+}
+
+/// Error diffusion with a fixed kernel: `same` holds the weights for the pixels 1, 2, ... ahead on
+/// the current row, `next` and `after` the `(dx, weight)` taps on the two rows below.
+fn diffuse_kernel<const SAME: usize, const NEXT: usize, const AFTER: usize>(
     img: &RgbaImage,
     palette: &Palette,
     opts: &DitherOptions,
-    kernel: &[DiffusionTap],
+    same: [f32; SAME],
+    next: [(isize, f32); NEXT],
+    after: [(isize, f32); AFTER],
     divisor: f32,
 ) -> RgbaImage {
     let w = img.width() as usize;
     let h = img.height() as usize;
-    let pixel_count = w * h;
-    let mut buf: Vec<[f32; 3]> = Vec::with_capacity(pixel_count);
-    let mut alphas: Vec<u8> = Vec::with_capacity(pixel_count);
-    let (src_pixels, _) = img.as_raw().as_chunks::<4>();
-    for &px in src_pixels {
-        buf.push(pixel_to_work(Rgba(px), opts.color_space));
-        alphas.push(px[3]);
-    }
-    let mut out_raw = vec![0u8; pixel_count * 4];
-    let scaled_taps: Vec<(i32, i32, f32)> = kernel
-        .iter()
-        .map(|tap| (tap.dx, tap.dy, tap.weight / divisor))
-        .collect();
+    let src = img.as_raw();
+    let mut dst = vec![0u8; w * h * 4];
+    let same = same.map(|weight| weight / divisor);
+    let next = next.map(|(dx, weight)| (dx, weight / divisor));
+    let after = after.map(|(dx, weight)| (dx, weight / divisor));
 
     let strength = opts.strength.clamp(0.0, 1.5);
     let bias = opts.bias.clamp(-0.5, 0.5);
@@ -853,61 +636,92 @@ fn diffuse_kernel(
     let mut rng = SplitMix64::new(opts.seed ^ 0xD174_E800_1234_5678);
     let palette_rgb = palette.colors();
     let matcher = palette.matcher(opts.color_space);
+    let mut rows = DiffusionRows::new(img, opts.color_space);
 
     for y in 0..h {
+        rows.begin_row(y);
         let reverse = opts.serpentine && (y % 2 == 1);
-        let dir: i32 = if reverse { -1 } else { 1 };
-        let row_off = y * w;
+        let dir: isize = if reverse { -1 } else { 1 };
+        let src_row = &src[y * w * 4..(y + 1) * w * 4];
+        let out_row = &mut dst[y * w * 4..(y + 1) * w * 4];
+        // Error for the very next pixel stays out of the row buffer until that pixel is read.
+        let mut ahead: Option<[f32; 3]> = None;
         for step in 0..w {
             let x = if reverse { w - 1 - step } else { step };
-            let idx = row_off + x;
-            let alpha = alphas[idx];
+            let alpha = src_row[x * 4 + 3];
             if alpha == 0 {
+                ahead = None;
                 continue;
             }
 
-            let jitter = if noise > 1e-5 {
-                (rng.next_f32() - 0.5) * noise
-            } else {
-                0.0
-            };
-            let bpx = buf[idx];
-            let cur = [
-                (bpx[0] + bias + jitter).clamp(0.0, 1.0),
-                (bpx[1] + bias + jitter).clamp(0.0, 1.0),
-                (bpx[2] + bias + jitter).clamp(0.0, 1.0),
-            ];
+            let i = x + ROW_PAD;
+            let mut bpx = rows.current[i];
+            if let Some(err) = ahead {
+                bpx[0] += err[0];
+                bpx[1] += err[1];
+                bpx[2] += err[2];
+            }
+            let cur = quantization_sample(bpx, bias, noise, &mut rng);
             let chosen_idx = matcher.nearest(cur);
             let chosen_rgb = palette_rgb[chosen_idx];
             let chosen_work = palette_work_color(palette, chosen_idx, opts.color_space);
-            let o = idx * 4;
-            out_raw[o] = chosen_rgb.r;
-            out_raw[o + 1] = chosen_rgb.g;
-            out_raw[o + 2] = chosen_rgb.b;
-            out_raw[o + 3] = alpha;
+            out_row[x * 4..x * 4 + 4].copy_from_slice(&[
+                chosen_rgb.r,
+                chosen_rgb.g,
+                chosen_rgb.b,
+                alpha,
+            ]);
 
             // Compute un-biased quantization error so bias doesn't accumulate unboundedly.
-            let err0 = (bpx[0] - chosen_work[0]) * strength;
-            let err1 = (bpx[1] - chosen_work[1]) * strength;
-            let err2 = (bpx[2] - chosen_work[2]) * strength;
-
-            for &(dx, dy, factor) in &scaled_taps {
-                let nx = x as i32 + dx * dir;
-                let ny = y as i32 + dy;
-                if nx >= 0 && nx < w as i32 && ny >= 0 && ny < h as i32 {
-                    let nidx = (ny as usize) * w + (nx as usize);
-                    if alphas[nidx] > 0 {
-                        buf[nidx][0] += err0 * factor;
-                        buf[nidx][1] += err1 * factor;
-                        buf[nidx][2] += err2 * factor;
-                    }
-                }
+            let err = diffusion_error(bpx, chosen_work, strength);
+            ahead = Some([err[0] * same[0], err[1] * same[0], err[2] * same[0]]);
+            for (distance, &factor) in same.iter().enumerate().skip(1) {
+                let n = i.wrapping_add_signed((distance as isize + 1) * dir);
+                add_error(&mut rows.current[n], err, factor);
+            }
+            for &(dx, factor) in &next {
+                add_error(&mut rows.next[i.wrapping_add_signed(dx * dir)], err, factor);
+            }
+            for &(dx, factor) in &after {
+                add_error(
+                    &mut rows.after[i.wrapping_add_signed(dx * dir)],
+                    err,
+                    factor,
+                );
             }
         }
+        rows.end_row();
     }
 
-    RgbaImage::from_raw(img.width(), img.height(), out_raw)
+    RgbaImage::from_raw(img.width(), img.height(), dst)
         .unwrap_or_else(|| RgbaImage::new(img.width(), img.height()))
+}
+
+/// The value matched against the palette: the accumulated pixel plus bias and jitter, clamped.
+#[inline]
+fn quantization_sample(bpx: [f32; 3], bias: f32, noise: f32, rng: &mut SplitMix64) -> [f32; 3] {
+    if noise > 1e-5 {
+        let jitter = (rng.next_f32() - 0.5) * noise;
+        return bpx.map(|v| (v + bias + jitter).clamp(0.0, 1.0));
+    }
+    if bias == 0.0 {
+        // `v + 0.0 + 0.0` only ever turns -0.0 into 0.0, and no distance depends on the sign
+        // of a zero, so the two additions can be skipped.
+        return bpx.map(|v| v.clamp(0.0, 1.0));
+    }
+    bpx.map(|v| (v + bias + 0.0).clamp(0.0, 1.0))
+}
+
+/// `(accumulated - chosen) * strength` per channel.
+#[inline]
+fn diffusion_error(bpx: [f32; 3], chosen: [f32; 3], strength: f32) -> [f32; 3] {
+    let diff = [bpx[0] - chosen[0], bpx[1] - chosen[1], bpx[2] - chosen[2]];
+    // Multiplying by exactly 1.0 returns the same bits.
+    if strength.to_bits() == 1.0f32.to_bits() {
+        diff
+    } else {
+        diff.map(|d| d * strength)
+    }
 }
 
 /// Precomputed 256-entry Ostromoukhov (SIGGRAPH 2001) tone-adaptive diffusion weight LUT.
@@ -973,21 +787,8 @@ fn ostromoukhov_weights(level: u8) -> [f32; 3] {
 fn diffuse_ostromoukhov(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) -> RgbaImage {
     let w = img.width() as usize;
     let h = img.height() as usize;
-    let pixel_count = w * h;
-    let mut buf: Vec<[f32; 3]> = Vec::with_capacity(pixel_count);
-    let mut orig_luma: Vec<u8> = Vec::with_capacity(pixel_count);
-    let mut alphas: Vec<u8> = Vec::with_capacity(pixel_count);
-    let (src_pixels, _) = img.as_raw().as_chunks::<4>();
-    for &px in src_pixels {
-        buf.push(pixel_to_work(Rgba(px), opts.color_space));
-        orig_luma.push(
-            (0.2126 * f32::from(px[0]) + 0.7152 * f32::from(px[1]) + 0.0722 * f32::from(px[2]))
-                .round()
-                .clamp(0.0, 255.0) as u8,
-        );
-        alphas.push(px[3]);
-    }
-    let mut out_raw = vec![0u8; pixel_count * 4];
+    let src = img.as_raw();
+    let mut dst = vec![0u8; w * h * 4];
 
     let strength = opts.strength.clamp(0.0, 1.5);
     let bias = opts.bias.clamp(-0.5, 0.5);
@@ -995,64 +796,60 @@ fn diffuse_ostromoukhov(img: &RgbaImage, palette: &Palette, opts: &DitherOptions
     let mut rng = SplitMix64::new(opts.seed ^ 0x0578_0300_ABCD_EF01);
     let palette_rgb = palette.colors();
     let matcher = palette.matcher(opts.color_space);
+    let mut rows = DiffusionRows::new(img, opts.color_space);
 
     for y in 0..h {
+        rows.begin_row(y);
         let reverse = opts.serpentine && (y % 2 == 1);
-        let dir: i32 = if reverse { -1 } else { 1 };
-        let row_off = y * w;
+        let dir: isize = if reverse { -1 } else { 1 };
+        let src_row = &src[y * w * 4..(y + 1) * w * 4];
+        let out_row = &mut dst[y * w * 4..(y + 1) * w * 4];
+        let mut ahead: Option<[f32; 3]> = None;
         for step in 0..w {
             let x = if reverse { w - 1 - step } else { step };
-            let idx = row_off + x;
-            let alpha = alphas[idx];
+            let px = &src_row[x * 4..x * 4 + 4];
+            let alpha = px[3];
             if alpha == 0 {
+                ahead = None;
                 continue;
             }
 
-            let jitter = if noise > 1e-5 {
-                (rng.next_f32() - 0.5) * noise
-            } else {
-                0.0
-            };
-            let bpx = buf[idx];
-            let cur = [
-                (bpx[0] + bias + jitter).clamp(0.0, 1.0),
-                (bpx[1] + bias + jitter).clamp(0.0, 1.0),
-                (bpx[2] + bias + jitter).clamp(0.0, 1.0),
-            ];
+            let i = x + ROW_PAD;
+            let mut bpx = rows.current[i];
+            if let Some(err) = ahead {
+                bpx[0] += err[0];
+                bpx[1] += err[1];
+                bpx[2] += err[2];
+            }
+            let cur = quantization_sample(bpx, bias, noise, &mut rng);
             let chosen_idx = matcher.nearest(cur);
             let chosen_rgb = palette_rgb[chosen_idx];
             let chosen_work = palette_work_color(palette, chosen_idx, opts.color_space);
-            let o = idx * 4;
-            out_raw[o] = chosen_rgb.r;
-            out_raw[o + 1] = chosen_rgb.g;
-            out_raw[o + 2] = chosen_rgb.b;
-            out_raw[o + 3] = alpha;
+            out_row[x * 4..x * 4 + 4].copy_from_slice(&[
+                chosen_rgb.r,
+                chosen_rgb.g,
+                chosen_rgb.b,
+                alpha,
+            ]);
 
-            let err0 = (bpx[0] - chosen_work[0]) * strength;
-            let err1 = (bpx[1] - chosen_work[1]) * strength;
-            let err2 = (bpx[2] - chosen_work[2]) * strength;
-            let weights = ostromoukhov_weights(orig_luma[idx]);
-            let taps = [
-                (dir, 0, weights[0]),
-                (-dir, 1, weights[1]),
-                (0, 1, weights[2]),
-            ];
-            for (dx, dy, factor) in taps {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if nx >= 0 && nx < w as i32 && ny >= 0 && ny < h as i32 {
-                    let nidx = (ny as usize) * w + (nx as usize);
-                    if alphas[nidx] > 0 {
-                        buf[nidx][0] += err0 * factor;
-                        buf[nidx][1] += err1 * factor;
-                        buf[nidx][2] += err2 * factor;
-                    }
-                }
-            }
+            let err = diffusion_error(bpx, chosen_work, strength);
+            let luma =
+                (0.2126 * f32::from(px[0]) + 0.7152 * f32::from(px[1]) + 0.0722 * f32::from(px[2]))
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+            let weights = ostromoukhov_weights(luma);
+            ahead = Some([
+                err[0] * weights[0],
+                err[1] * weights[0],
+                err[2] * weights[0],
+            ]);
+            add_error(&mut rows.next[i.wrapping_add_signed(-dir)], err, weights[1]);
+            add_error(&mut rows.next[i], err, weights[2]);
         }
+        rows.end_row();
     }
 
-    RgbaImage::from_raw(img.width(), img.height(), out_raw)
+    RgbaImage::from_raw(img.width(), img.height(), dst)
         .unwrap_or_else(|| RgbaImage::new(img.width(), img.height()))
 }
 
