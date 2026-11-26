@@ -1,6 +1,8 @@
 //! Image resizing, tonal adjustment, sharpening/blurring, and alpha handling before dithering.
 
 use image::RgbaImage;
+use std::borrow::Cow;
+
 use image::imageops;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -163,18 +165,23 @@ pub fn plan_dimensions(src_w: u32, src_h: u32, opts: &PreprocessOptions) -> (u32
 /// Resize, apply alpha flattening, tonal adjustments, blur/sharpen, and downscale for `pixel_size`.
 #[must_use]
 pub fn prepare_image(src: &RgbaImage, opts: &PreprocessOptions) -> PreparedImage {
+    prepare(Cow::Borrowed(src), opts)
+}
+
+/// [`prepare_image`], working in place on `src` when no resize is needed instead of copying it.
+pub(crate) fn prepare(src: Cow<'_, RgbaImage>, opts: &PreprocessOptions) -> PreparedImage {
     let (final_w, final_h) = plan_dimensions(src.width(), src.height(), opts);
 
     // Resize to final target first (handling cover crop cleanly).
     let mut img = if final_w == src.width() && final_h == src.height() {
-        src.clone()
+        src.into_owned()
     } else if matches!(
         (opts.width, opts.height, opts.fit),
         (Some(_), Some(_), FitMode::Cover)
     ) {
-        resize_cover(src, final_w, final_h)
+        resize_cover(&src, final_w, final_h)
     } else {
-        resize_lanczos3(src, final_w, final_h)
+        resize_lanczos3(&src, final_w, final_h)
     };
 
     // If pixel_size > 1, downscale to the coarse dither grid before tonal adjustments & dithering.

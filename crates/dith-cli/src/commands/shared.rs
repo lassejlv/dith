@@ -49,11 +49,11 @@ pub(crate) fn load_input_image(path: &Path) -> Result<RgbaImage> {
             .read_to_end(&mut buf)
             .context("reading input image bytes from stdin")?;
         let img = image::load_from_memory(&buf).context("decoding input image from stdin")?;
-        Ok(img.to_rgba8())
+        Ok(img.into_rgba8())
     } else {
         let img = image::open(path)
             .with_context(|| format!("opening input image '{}'", path.display()))?;
-        Ok(img.to_rgba8())
+        Ok(img.into_rgba8())
     }
 }
 

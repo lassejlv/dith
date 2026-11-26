@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::cli::DitherFlags;
 use dith_core::output::{OutputFormat, encode_image, write_output_file};
 use dith_core::preprocess::plan_dimensions;
-use dith_core::recipe::run_pipeline;
+use dith_core::recipe::run_pipeline_owned;
 
 use super::shared::load_input_image;
 
@@ -111,7 +111,7 @@ pub(crate) fn handle_batch(args: &BatchArgs, as_json: bool) -> Result<()> {
 
             let process = || -> Result<([u32; 2], usize, u128)> {
                 let img = load_input_image(input)?;
-                let out = run_pipeline(&img, &recipe)?;
+                let out = run_pipeline_owned(img, &recipe)?;
                 let bytes = encode_image(&out.image, format, &recipe.export)?;
                 write_output_file(&out_path, &bytes)?;
                 Ok((
