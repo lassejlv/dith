@@ -267,7 +267,8 @@ struct AnimateReport {
     anim_format: &'static str,
     temporal: &'static str,
     frame_count: usize,
-    fps: u32,
+    /// Playback rate; `null` unless every frame has the same delay (see `frames[].delay_ms`).
+    fps: Option<u32>,
     total_duration_ms: u64,
     loops: u16,
     preset: Option<String>,
@@ -724,7 +725,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
             anim_format: anim_format.id(),
             temporal: temporal.id(),
             frame_count: total_frames,
-            fps,
+            fps: uniform_fps(&delays),
             total_duration_ms: delays.iter().map(|&d| u64::from(d)).sum(),
             loops: args.loops,
             preset: recipe.preset.clone(),
@@ -750,10 +751,9 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
             println!(
-                "Dry run: {} ({} frames @ {}fps, {}x{}, algo={}, temporal={}, format={})",
+                "Dry run: {} ({}, {}x{}, algo={}, temporal={}, format={})",
                 report.source,
-                report.frame_count,
-                report.fps,
+                timing_label(&report),
                 out_w,
                 out_h,
                 report.algorithm,
@@ -875,14 +875,6 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
 
     let delays: Vec<u32> = anim.frames.iter().map(|f| f.delay_ms).collect();
     let total_duration_ms: u64 = delays.iter().map(|&d| u64::from(d)).sum();
-    let effective_fps = if total_duration_ms > 0 {
-        ((anim.frames.len() as f64 * 1000.0) / total_duration_ms as f64)
-            .round()
-            .clamp(1.0, 60.0) as u32
-    } else {
-        fps
-    };
-
     let mut bytes_written = 0usize;
     let mut spritesheet_grid = None;
 
@@ -909,7 +901,7 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         anim_format: anim_format.id(),
         temporal: temporal.id(),
         frame_count: anim.frames.len(),
-        fps: effective_fps,
+        fps: uniform_fps(&delays),
         total_duration_ms,
         loops: args.loops,
         preset: recipe.preset.clone(),
@@ -1107,6 +1099,32 @@ fn parse_byte_size(raw: &str) -> Result<u64, String> {
     Ok(bytes as u64)
 }
 
+/// Playback rate when every frame shows for the same time and that rate is 1..=60 fps.
+fn uniform_fps(delays: &[u32]) -> Option<u32> {
+    let first = *delays.first()?;
+    if first == 0 || first > 1000 || delays.iter().any(|&d| d != first) {
+        return None;
+    }
+    Some((1000.0 / f64::from(first)).round().clamp(1.0, 60.0) as u32)
+}
+
+/// Frame count with either the playback rate or, when delays differ, the total duration.
+fn timing_label(report: &AnimateReport) -> String {
+    if let Some(fps) = report.fps {
+        return format!("{} frames @ {fps}fps", report.frame_count);
+    }
+    let varies = report
+        .frames
+        .windows(2)
+        .any(|pair| pair[0].delay_ms != pair[1].delay_ms);
+    format!(
+        "{} frames, {:.2} s{}",
+        report.frame_count,
+        report.total_duration_ms as f64 / 1000.0,
+        if varies { ", variable timing" } else { "" }
+    )
+}
+
 fn print_animate_summary(report: &AnimateReport) {
     let dest = report
         .output
@@ -1114,11 +1132,10 @@ fn print_animate_summary(report: &AnimateReport) {
         .or(report.frames_dir.as_deref())
         .unwrap_or("<viewer>");
     println!(
-        "Animated {} -> {} ({} frames @ {}fps, {}x{}, {} bytes, algo={}, palette={}, temporal={}, {}ms)",
+        "Animated {} -> {} ({}, {}x{}, {} bytes, algo={}, palette={}, temporal={}, {}ms)",
         report.source,
         dest,
-        report.frame_count,
-        report.fps,
+        timing_label(report),
         report.frame_dimensions[0],
         report.frame_dimensions[1],
         report.bytes_written,
