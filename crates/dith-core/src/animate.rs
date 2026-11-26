@@ -972,7 +972,8 @@ fn apply_palette_cycle(img: &mut RgbaImage, palette: &Palette, frame_idx: usize,
 /// pixels that differ from what is already on the canvas. Unchanged pixels inside it are written
 /// as their color, as a reserved transparent index, or a mix of both, whichever compresses best on
 /// the animation's largest frames.
-/// Animations with real transparency store whole frames that are cleared after display.
+/// Animations with real transparency keep the previous frame wherever nothing has to be erased and
+/// clear only the area that does.
 ///
 /// # Errors
 /// Returns an error if frames are empty, exceed 65535px, or GIF encoding fails.
@@ -1043,25 +1044,38 @@ pub fn encode_gif(
         .collect();
 
     let width = usize::from(w);
-    let plans: Vec<(GifCanvas<'_>, GifRegion, Disposal)> = (0..frames.len())
-        .into_par_iter()
-        .map(|i| {
-            let canvas = GifCanvas {
-                prev: i
-                    .checked_sub(1)
-                    .filter(|_| !has_transparency)
-                    .map(|p| index_frames[p].as_slice()),
-                width,
-                blank: reserved.map_or(256, u16::from),
-            };
-            let disposal = if has_transparency {
-                Disposal::Background
-            } else {
-                Disposal::Keep
-            };
-            (canvas, canvas.plan(&index_frames[i]), disposal)
-        })
-        .collect();
+    let plan = |i: usize, cleared: Option<GifRegion>| {
+        let canvas = GifCanvas {
+            prev: i.checked_sub(1).map(|p| index_frames[p].as_slice()),
+            cleared,
+            width,
+            blank: reserved.map_or(256, u16::from),
+        };
+        let next = index_frames
+            .get((i + 1) % index_frames.len())
+            .filter(|_| has_transparency)
+            .map(Vec::as_slice);
+        (canvas, canvas.plan(&index_frames[i], next))
+    };
+    // Only a cleared area makes a frame depend on how the one before it was stored.
+    let plans: Vec<(GifCanvas<'_>, GifRegion, Disposal)> = if has_transparency {
+        let mut cleared = None;
+        (0..frames.len())
+            .map(|i| {
+                let (canvas, (region, disposal)) = plan(i, cleared);
+                cleared = (disposal == Disposal::Background).then_some(region);
+                (canvas, region, disposal)
+            })
+            .collect()
+    } else {
+        (0..frames.len())
+            .into_par_iter()
+            .map(|i| {
+                let (canvas, (region, disposal)) = plan(i, None);
+                (canvas, region, disposal)
+            })
+            .collect()
+    };
 
     let transparent = reserved.unwrap_or(0);
     let stored: Vec<(Vec<u8>, Vec<bool>)> = plans
@@ -1232,11 +1246,18 @@ struct GifRegion {
     h: usize,
 }
 
+impl GifRegion {
+    fn contains(self, x: usize, y: usize) -> bool {
+        (self.x..self.x + self.w).contains(&x) && (self.y..self.y + self.h).contains(&y)
+    }
+}
+
 /// What a decoder's canvas shows just before a frame is drawn: the previous frame's palette
-/// indices, or nothing before the first frame.
+/// indices, minus the area that frame cleared when it was disposed.
 #[derive(Debug, Clone, Copy)]
 struct GifCanvas<'a> {
     prev: Option<&'a [u8]>,
+    cleared: Option<GifRegion>,
     width: usize,
     /// Value standing for a transparent canvas pixel: the reserved index, or 256 without one.
     blank: u16,
@@ -1244,39 +1265,61 @@ struct GifCanvas<'a> {
 
 impl GifCanvas<'_> {
     fn at(&self, x: usize, y: usize) -> u16 {
-        self.prev
-            .map_or(self.blank, |prev| u16::from(prev[y * self.width + x]))
+        match self.prev {
+            Some(prev) if !self.cleared.is_some_and(|c| c.contains(x, y)) => {
+                u16::from(prev[y * self.width + x])
+            }
+            _ => self.blank,
+        }
     }
 
-    /// The region frame `cur` has to store: the whole canvas for the first frame, else the
-    /// bounding box of every pixel that differs from the canvas.
-    fn plan(&self, cur: &[u8]) -> GifRegion {
+    /// Choose the region frame `cur` has to store and how to dispose of it. The first frame covers
+    /// the whole canvas, later ones every pixel that differs from the canvas. When `next` turns
+    /// pixels transparent that are opaque in `cur`, the region also covers those and is cleared
+    /// after display, because a kept frame can only be painted over, never erased. The last frame's
+    /// `next` is the first, so the loop restarts on an exact canvas.
+    fn plan(&self, cur: &[u8], next: Option<&[u8]>) -> (GifRegion, Disposal) {
         let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+        let mut must_clear = false;
         for (y, row) in cur.chunks_exact(self.width).enumerate() {
-            let stored = |x: usize| self.prev.is_none() || self.at(x, y) != u16::from(row[x]);
+            let next_row = next.map(|n| &n[y * self.width..(y + 1) * self.width]);
+            let erased = |x: usize| {
+                next_row.is_some_and(|n| u16::from(n[x]) == self.blank)
+                    && u16::from(row[x]) != self.blank
+            };
+            let stored =
+                |x: usize| self.prev.is_none() || self.at(x, y) != u16::from(row[x]) || erased(x);
             if let Some(first) = (0..self.width).position(stored) {
                 let last = (0..self.width).rposition(stored).unwrap_or(first);
                 x0 = x0.min(first);
                 x1 = x1.max(last);
                 y0 = y0.min(y);
                 y1 = y1.max(y);
+                must_clear = must_clear || (first..=last).any(erased);
             }
         }
         if x0 == usize::MAX {
-            // Nothing to draw: a single pixel that leaves the canvas untouched.
-            return GifRegion {
+            // Nothing to draw or erase: a single pixel that leaves the canvas untouched.
+            let region = GifRegion {
                 x: 0,
                 y: 0,
                 w: 1,
                 h: 1,
             };
+            return (region, Disposal::Keep);
         }
-        GifRegion {
+        let region = GifRegion {
             x: x0,
             y: y0,
             w: x1 - x0 + 1,
             h: y1 - y0 + 1,
-        }
+        };
+        let disposal = if must_clear {
+            Disposal::Background
+        } else {
+            Disposal::Keep
+        };
+        (region, disposal)
     }
 
     /// Palette indices of `cur` inside `region`, with a flag per pixel that is set where the
@@ -1851,6 +1894,64 @@ mod tests {
             size < single * 2,
             "9 moving-square deltas ({size} B) should cost less than one noise frame ({single} B)"
         );
+    }
+
+    #[test]
+    fn transparent_gif_deltas_decode_to_identical_frames() {
+        let clear = Rgba([0, 0, 0, 0]);
+        let panel = Rgba([20, 30, 140, 255]);
+        let sprite = Rgba([230, 200, 40, 255]);
+        let frames: Vec<AnimFrame> = (0..8u32)
+            .map(|i| {
+                let mut image = RgbaImage::from_pixel(48, 32, clear);
+                for y in 2..10 {
+                    for x in 2..20 {
+                        image.put_pixel(x, y, panel);
+                    }
+                }
+                let sx = if i < 4 { i * 6 } else { (8 - i) * 6 };
+                for y in 18..26 {
+                    for x in sx..sx + 6 {
+                        image.put_pixel(x, y, sprite);
+                    }
+                }
+                if i % 2 == 0 {
+                    image.put_pixel(40, 4, sprite);
+                }
+                AnimFrame {
+                    image,
+                    delay_ms: 80,
+                }
+            })
+            .collect();
+        let palette = Palette::from_hex_list("#141e8c,#e6c828").unwrap();
+        let bytes = encode_gif(&frames, &palette, 0, false).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alpha.gif");
+        fs::write(&path, &bytes).unwrap();
+        let decoded = decode_gif_frames(&path, None, None).unwrap();
+        assert_eq!(decoded.len(), frames.len());
+        for (i, (dec, src)) in decoded.iter().zip(&frames).enumerate() {
+            for (d, s) in dec.image.pixels().zip(src.image.pixels()) {
+                if s[3] == 0 {
+                    assert_eq!(d[3], 0, "frame {i} should be transparent here");
+                } else {
+                    assert_eq!(d.0, s.0, "frame {i}");
+                }
+            }
+        }
+        let options = {
+            let mut options = gif::DecodeOptions::new();
+            options.set_color_output(gif::ColorOutput::Indexed);
+            options
+        };
+        let mut reader = options.read_info(std::io::Cursor::new(&bytes)).unwrap();
+        let mut areas = Vec::new();
+        while let Some(frame) = reader.read_next_frame().unwrap() {
+            areas.push(u32::from(frame.width) * u32::from(frame.height));
+        }
+        assert_eq!(areas[0], 48 * 32);
+        assert!(areas[1..].iter().all(|&a| a < 48 * 32), "{areas:?}");
     }
 
     #[test]
