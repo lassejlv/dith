@@ -60,6 +60,8 @@ pub mod resample;
 #[cfg(feature = "svg")]
 pub mod svg;
 
+mod deflate;
+mod huffman;
 mod nearest;
 mod png_optimize;
 mod webp;

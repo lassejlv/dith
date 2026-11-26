@@ -1,6 +1,6 @@
 //! Image export (PNG/WebP/JPEG/GIF/BMP/TIFF, vector SVG, Kitty graphics, Braille, ASCII) and stats.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -13,6 +13,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::Rgb;
+use crate::deflate::Effort;
+use crate::png_optimize::write_chunk;
 
 /// Maximum Base64 payload bytes per Kitty graphics protocol chunk (per Kitty spec).
 const KITTY_CHUNK_SIZE: usize = 4096;
@@ -643,7 +645,23 @@ pub fn encode_kitty_png(png_bytes: &[u8], opts: KittyOptions) -> String {
 /// # Errors
 /// Returns an error if PNG encoding fails.
 pub fn encode_png_bytes(img: &RgbaImage) -> Result<Vec<u8>> {
-    encode_png(img, png::Compression::High)
+    let layout = PngLayout::for_images([img]);
+    if !matches!(layout, PngLayout::Indexed(_)) {
+        return encode_png(img, png::Compression::High);
+    }
+    let scanlines = layout.unfiltered_scanlines(img);
+    let mut out = layout.png_header(img.width(), img.height());
+    for part in crate::deflate::zlib_compress(
+        &scanlines,
+        scanlines.len() / img.height().max(1) as usize,
+        Effort::DEFAULT,
+    )
+    .chunks(i32::MAX as usize)
+    {
+        write_chunk(&mut out, *b"IDAT", part);
+    }
+    write_chunk(&mut out, *b"IEND", &[]);
+    Ok(out)
 }
 
 /// Like [`encode_png_bytes`], but spends far more CPU for the smallest possible file: the palette
@@ -792,17 +810,28 @@ pub(crate) enum PngLayout {
 impl PngLayout {
     pub(crate) fn for_images<'a>(images: impl IntoIterator<Item = &'a RgbaImage>) -> Self {
         let mut palette: Vec<[u8; 4]> = Vec::new();
-        let mut seen: HashSet<[u8; 4]> = HashSet::new();
+        let mut seen = ColorIndex::default();
         let mut opaque = true;
         let mut indexable = true;
         for img in images {
             let (pixels, _) = img.as_raw().as_chunks::<4>();
+            let mut last = None;
             for &px in pixels {
+                if last == Some(px) {
+                    continue;
+                }
+                last = Some(px);
                 opaque &= px[3] == 255;
-                if indexable && seen.insert(px) {
+                if indexable && seen.get(px).is_none() {
                     indexable = palette.len() < 256;
+                    if indexable {
+                        seen.insert(px, palette.len() as u8);
+                    }
                     palette.push(px);
                 }
+            }
+            if !indexable && !opaque {
+                break;
             }
         }
         if indexable && !palette.is_empty() {
@@ -871,31 +900,138 @@ impl PngLayout {
 
     /// Raw PNG scanline data (before filtering) for `img`, whose colors must be covered by this layout.
     pub(crate) fn pixel_data(&self, img: &RgbaImage) -> Vec<u8> {
+        self.scanlines(img, false)
+    }
+
+    /// PNG scanlines of `img` with the filter type byte 0 (None) in front of every row.
+    pub(crate) fn unfiltered_scanlines(&self, img: &RgbaImage) -> Vec<u8> {
+        self.scanlines(img, true)
+    }
+
+    fn scanlines(&self, img: &RgbaImage, filter_bytes: bool) -> Vec<u8> {
         let (pixels, _) = img.as_raw().as_chunks::<4>();
+        let width = img.width() as usize;
+        let lead = usize::from(filter_bytes);
         match self {
             Self::Indexed(palette) => {
-                let lookup: HashMap<[u8; 4], u8> = palette
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &c)| (c, i as u8))
-                    .collect();
+                let indices = palette_indices(img, palette);
                 let depth = usize::from(self.bit_depth());
                 let per_byte = 8 / depth;
-                let width = img.width() as usize;
-                let row_bytes = width.div_ceil(per_byte);
+                let row_bytes = lead + width.div_ceil(per_byte);
                 let mut out = vec![0u8; row_bytes * img.height() as usize];
-                for (row, out_row) in pixels.chunks(width.max(1)).zip(out.chunks_mut(row_bytes)) {
-                    for (x, px) in row.iter().enumerate() {
-                        let shift = 8 - depth * (x % per_byte + 1);
-                        out_row[x / per_byte] |= lookup[px] << shift;
+                for (row, out_row) in indices.chunks(width.max(1)).zip(out.chunks_mut(row_bytes)) {
+                    for (group, byte) in row.chunks(per_byte).zip(&mut out_row[lead..]) {
+                        for (k, &index) in group.iter().enumerate() {
+                            *byte |= index << (8 - depth * (k + 1));
+                        }
                     }
                 }
                 out
             }
-            Self::Rgb => pixels.iter().flat_map(|px| [px[0], px[1], px[2]]).collect(),
-            Self::Rgba => img.as_raw().clone(),
+            Self::Rgb | Self::Rgba => {
+                let channels = if matches!(self, Self::Rgb) { 3 } else { 4 };
+                let mut out = Vec::with_capacity((lead + width * channels) * img.height() as usize);
+                for row in pixels.chunks(width.max(1)) {
+                    out.extend_from_slice(&[0][..lead]);
+                    for px in row {
+                        out.extend_from_slice(&px[..channels]);
+                    }
+                }
+                out
+            }
         }
     }
+
+    /// The PNG signature, `IHDR` and, for indexed layouts, `PLTE` and `tRNS` chunks.
+    pub(crate) fn png_header(&self, width: u32, height: u32) -> Vec<u8> {
+        let mut out = crate::png_optimize::SIGNATURE.to_vec();
+        let mut ihdr = [0u8; 13];
+        ihdr[..4].copy_from_slice(&width.to_be_bytes());
+        ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+        ihdr[8] = self.bit_depth();
+        ihdr[9] = match self {
+            Self::Indexed(_) => 3,
+            Self::Rgb => 2,
+            Self::Rgba => 6,
+        };
+        write_chunk(&mut out, *b"IHDR", &ihdr);
+        if let Self::Indexed(palette) = self {
+            let plte: Vec<u8> = palette.iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
+            write_chunk(&mut out, *b"PLTE", &plte);
+            let trns: Vec<u8> = palette
+                .iter()
+                .map(|c| c[3])
+                .take_while(|&a| a < 255)
+                .collect();
+            if !trns.is_empty() {
+                write_chunk(&mut out, *b"tRNS", &trns);
+            }
+        }
+        out
+    }
+}
+
+/// Open-addressed map from RGBA colors to palette indices, for palettes of at most 256 colors.
+#[derive(Debug)]
+pub(crate) struct ColorIndex {
+    slots: Vec<(u32, u16)>,
+}
+
+impl Default for ColorIndex {
+    fn default() -> Self {
+        Self {
+            slots: vec![(0, Self::EMPTY); 1 << Self::BITS],
+        }
+    }
+}
+
+impl ColorIndex {
+    const BITS: u32 = 10;
+    const EMPTY: u16 = u16::MAX;
+
+    pub(crate) fn from_palette(palette: &[[u8; 4]]) -> Self {
+        let mut index = Self::default();
+        for (i, &color) in palette.iter().enumerate().take(256) {
+            index.insert(color, i as u8);
+        }
+        index
+    }
+
+    fn slot(&self, key: u32) -> usize {
+        let mut slot = (key.wrapping_mul(0x9E37_79B1) >> (32 - Self::BITS)) as usize;
+        while self.slots[slot].1 != Self::EMPTY && self.slots[slot].0 != key {
+            slot = (slot + 1) & ((1 << Self::BITS) - 1);
+        }
+        slot
+    }
+
+    pub(crate) fn get(&self, color: [u8; 4]) -> Option<u8> {
+        let key = u32::from_le_bytes(color);
+        let (_, value) = self.slots[self.slot(key)];
+        (value != Self::EMPTY).then_some(value as u8)
+    }
+
+    pub(crate) fn insert(&mut self, color: [u8; 4], index: u8) {
+        let key = u32::from_le_bytes(color);
+        let slot = self.slot(key);
+        self.slots[slot] = (key, u16::from(index));
+    }
+}
+
+/// The palette index of every pixel of `img`, whose colors must all be in `palette`.
+pub(crate) fn palette_indices(img: &RgbaImage, palette: &[[u8; 4]]) -> Vec<u8> {
+    let lookup = ColorIndex::from_palette(palette);
+    let (pixels, _) = img.as_raw().as_chunks::<4>();
+    let mut last = (palette.first().copied().unwrap_or_default(), 0u8);
+    pixels
+        .iter()
+        .map(|&px| {
+            if px != last.0 {
+                last = (px, lookup.get(px).unwrap_or(0));
+            }
+            last.1
+        })
+        .collect()
 }
 
 /// Standard RFC 4648 Base64 encoder (zero extra dependencies).
