@@ -1,25 +1,32 @@
 //! Maximum lossless PNG/APNG compression behind `--optimize`.
 //!
-//! Indexed palettes are tried in a few orders, every image stream (the `IDAT` image and each APNG
-//! `fdAT` frame) is re-filtered with the best of several PNG filter strategies, and the winners are
-//! recompressed with Zopfli; all other chunks are kept as is.
+//! Indexed palettes are tried in a few orders and every image stream (the `IDAT` image and each
+//! APNG `fdAT` frame) is re-filtered with the best of several PNG filter strategies. Candidates
+//! are ranked with the fast setting of this crate's DEFLATE encoder; the winners are compressed
+//! with its slow setting and with Zopfli, and the smaller stream is kept. All other chunks are
+//! kept as is.
+//!
+//! Packed indexed scanlines (1, 2 or 4 bits per pixel) are only tried unfiltered: byte-wise PNG
+//! filters scramble packed dither patterns and never win there.
 
-use std::io::{Read, Write};
+use std::io::Read;
 
 use anyhow::{Context, Result, bail, ensure};
 use flate2::read::ZlibDecoder;
-use flate2::write::ZlibEncoder;
 use flate2::{Compress, Crc, FlushCompress};
 use rayon::prelude::*;
+
+use crate::deflate::{Effort, zlib_compress};
+use crate::huffman::entropy_q8;
 
 pub(crate) const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 
 /// Largest chunk payload allowed by the PNG specification.
 const MAX_CHUNK_LEN: usize = i32::MAX as usize;
 
-/// How many of the best filter strategies, ranked by a fast trial compression, get a full Zopfli
-/// pass.
-const ZOPFLI_FINALISTS: usize = 2;
+/// How many of the best filter strategies, ranked by a fast trial compression, are compressed at
+/// full effort.
+const FINALISTS: usize = 2;
 
 /// Rows of already filtered output the `Brute` strategy compresses along with each candidate row.
 const BRUTE_CONTEXT_ROWS: usize = 7;
@@ -183,21 +190,25 @@ pub(crate) fn recompress(stored: &[u8]) -> Result<Vec<u8>> {
     };
 
     let bpp = bits_per_pixel.div_ceil(8);
+    let strategies: &[Strategy] = match (indexed, depth) {
+        (true, 1 | 2 | 4) => &STRATEGIES[..1],
+        (true, _) => &STRATEGIES[..STRATEGIES.len() - 1],
+        (false, _) => &STRATEGIES,
+    };
     let (palette, finalists) = candidates
         .into_par_iter()
         .map(|(palette, images)| {
-            let finalists = images
+            let finalists: Vec<Vec<Trial>> = images
                 .par_iter()
                 .zip(frames.par_iter())
                 .map(|(raw, &(width, _))| {
-                    trial_filters(raw, (width * bits_per_pixel).div_ceil(8), bpp)
+                    trial_filters(raw, (width * bits_per_pixel).div_ceil(8), bpp, strategies)
                 })
-                .collect::<std::io::Result<Vec<_>>>()?;
-            let total: usize = finalists.iter().map(|f| f[0].0).sum();
-            Ok((total, palette, finalists))
+                .collect();
+            let total: usize = finalists.iter().map(|f| f[0].size).sum();
+            (total, palette, finalists)
         })
-        .collect::<std::io::Result<Vec<_>>>()
-        .context("trial-compressing PNG filter strategies")?
+        .collect::<Vec<_>>()
         .into_iter()
         .min_by_key(|(total, _, _)| *total)
         .map(|(_, palette, finalists)| (palette, finalists))
@@ -205,18 +216,29 @@ pub(crate) fn recompress(stored: &[u8]) -> Result<Vec<u8>> {
 
     let mut streams = finalists
         .into_par_iter()
-        .map(|candidates| {
-            candidates
+        .map(|trials| {
+            trials
                 .into_par_iter()
-                .map(|(_, filtered)| {
-                    let mut out = Vec::new();
-                    zopfli::compress(
-                        zopfli::Options::default(),
-                        zopfli::Format::Zlib,
-                        filtered.as_slice(),
-                        &mut out,
-                    )
-                    .map(|()| out)
+                .enumerate()
+                .flat_map(|(rank, trial)| {
+                    let mut streams = vec![Ok(zlib_compress(
+                        &trial.filtered,
+                        trial.stride,
+                        Effort::HIGH,
+                    ))];
+                    if rank == 0 {
+                        let mut out = Vec::new();
+                        streams.push(
+                            zopfli::compress(
+                                zopfli::Options::default(),
+                                zopfli::Format::Zlib,
+                                trial.filtered.as_slice(),
+                                &mut out,
+                            )
+                            .map(|()| out),
+                        );
+                    }
+                    streams
                 })
                 .collect::<std::io::Result<Vec<_>>>()
                 .map(|s| s.into_iter().min_by_key(Vec::len).unwrap_or_default())
@@ -344,21 +366,33 @@ fn unfiltered_scanlines(zlib: &[u8], width: usize, bits_per_pixel: usize) -> Res
     Ok(raw)
 }
 
-/// Filter `raw` with every strategy and return the [`ZOPFLI_FINALISTS`] smallest after a fast
-/// trial compression, as `(trial size, filtered scanlines)` sorted by size.
-fn trial_filters(raw: &[u8], row_len: usize, bpp: usize) -> std::io::Result<Vec<(usize, Vec<u8>)>> {
-    let mut trials = STRATEGIES
+/// One filtered candidate for an image stream.
+struct Trial {
+    /// Compressed size at the fast trial effort.
+    size: usize,
+    stride: usize,
+    filtered: Vec<u8>,
+}
+
+/// Filter `raw` with each of `strategies` and return the [`FINALISTS`] distinct results that
+/// compress smallest at a fast trial effort, smallest first.
+fn trial_filters(raw: &[u8], row_len: usize, bpp: usize, strategies: &[Strategy]) -> Vec<Trial> {
+    let stride = row_len + 1;
+    let mut trials: Vec<Trial> = strategies
         .par_iter()
         .map(|&strategy| {
             let filtered = apply_strategy(strategy, raw, row_len, bpp);
-            let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-            encoder.write_all(&filtered)?;
-            Ok((encoder.finish()?.len(), filtered))
+            Trial {
+                size: zlib_compress(&filtered, stride, Effort::DEFAULT).len(),
+                stride,
+                filtered,
+            }
         })
-        .collect::<std::io::Result<Vec<_>>>()?;
-    trials.sort_by_key(|(size, _)| *size);
-    trials.truncate(ZOPFLI_FINALISTS);
-    Ok(trials)
+        .collect();
+    trials.sort_by_key(|trial| trial.size);
+    trials.dedup_by(|a, b| a.filtered == b.filtered);
+    trials.truncate(FINALISTS);
+    trials
 }
 
 /// Filter every `row_len`-byte scanline of `raw`, prefixing each with its filter type byte.
@@ -374,7 +408,7 @@ fn apply_strategy(strategy: Strategy, raw: &[u8], row_len: usize, bpp: usize) ->
             filter_row(kind, bpp, prev, row, &mut out);
         } else {
             let context = &out[out.len().saturating_sub(BRUTE_CONTEXT_ROWS * (row_len + 1))..];
-            let mut best_score = f64::INFINITY;
+            let mut best_score = u64::MAX;
             for kind in 0..5 {
                 candidate.clear();
                 filter_row(kind, bpp, prev, row, &mut candidate);
@@ -416,20 +450,20 @@ impl RowScorer {
     }
 
     /// Score `candidate` (a filter type byte plus residuals) following the filtered `context` rows.
-    fn score(&mut self, context: &[u8], candidate: &[u8]) -> f64 {
+    fn score(&mut self, context: &[u8], candidate: &[u8]) -> u64 {
         let residuals = &candidate[1..];
         match self.strategy {
-            Strategy::Fixed(_) => 0.0,
+            Strategy::Fixed(_) => 0,
             Strategy::MinSum => residuals
                 .iter()
                 .map(|&b| u64::from(b.cast_signed().unsigned_abs()))
-                .sum::<u64>() as f64,
+                .sum::<u64>(),
             Strategy::Entropy => {
                 let mut counts = [0u32; 256];
                 for &b in residuals {
                     counts[usize::from(b)] += 1;
                 }
-                entropy_bits(counts.iter().copied(), residuals.len())
+                entropy_q8(&counts)
             }
             Strategy::Bigrams | Strategy::BigEnt => {
                 for pair in residuals.windows(2) {
@@ -440,12 +474,11 @@ impl RowScorer {
                     self.pair_counts[index] += 1;
                 }
                 let score = if self.strategy == Strategy::Bigrams {
-                    self.touched.len() as f64
+                    self.touched.len() as u64
                 } else {
-                    entropy_bits(
-                        self.touched.iter().map(|&i| self.pair_counts[i]),
-                        residuals.len().saturating_sub(1),
-                    )
+                    let counts: Vec<u32> =
+                        self.touched.iter().map(|&i| self.pair_counts[i]).collect();
+                    entropy_q8(&counts)
                 };
                 for &i in &self.touched {
                     self.pair_counts[i] = 0;
@@ -464,24 +497,12 @@ impl RowScorer {
                     &mut compressed,
                     FlushCompress::Finish,
                 ) {
-                    Ok(_) => compressed.len() as f64,
-                    Err(_) => f64::INFINITY,
+                    Ok(_) => compressed.len() as u64,
+                    Err(_) => u64::MAX,
                 }
             }
         }
     }
-}
-
-/// Shannon entropy in bits of a symbol histogram (`total` symbols in all).
-fn entropy_bits(counts: impl Iterator<Item = u32>, total: usize) -> f64 {
-    let total = total as f64;
-    counts
-        .filter(|&c| c > 0)
-        .map(|c| {
-            let c = f64::from(c);
-            -c * (c / total).log2()
-        })
-        .sum()
 }
 
 /// Append the PNG filter type byte and the filtered bytes of `row` (with `prev` as the row above).

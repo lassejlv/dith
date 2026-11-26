@@ -64,6 +64,11 @@ impl Effort {
         chain_limit: 32,
         refinements: 4,
     };
+    /// Slower, for `--optimize`.
+    pub(crate) const HIGH: Self = Self {
+        chain_limit: 1024,
+        refinements: 30,
+    };
 }
 
 /// Compress `data` into a zlib stream.
@@ -888,11 +893,6 @@ mod tests {
 
     use super::*;
 
-    const HIGH: Effort = Effort {
-        chain_limit: 1024,
-        refinements: 30,
-    };
-
     fn round_trip(data: &[u8], effort: Effort) -> usize {
         let compressed = zlib_compress(data, 977, effort);
         let mut decoded = Vec::new();
@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn every_kind_of_input_round_trips() {
-        for effort in [Effort::DEFAULT, HIGH] {
+        for effort in [Effort::DEFAULT, Effort::HIGH] {
             round_trip(&[], effort);
             round_trip(&[7], effort);
             round_trip(&[1, 2], effort);
@@ -964,6 +964,6 @@ mod tests {
         let mut data = noise(300, 41, 0xFF);
         data.extend(vec![0u8; WINDOW + 500]);
         data.extend(noise(300, 41, 0xFF));
-        round_trip(&data, HIGH);
+        round_trip(&data, Effort::HIGH);
     }
 }
