@@ -21,12 +21,16 @@ use dith_core::output::{
     ColorUsage, OutputFormat, encode_image, render_ascii, render_braille, write_output_file,
 };
 use dith_core::palette::Palette;
-use dith_core::preprocess::{FitMode, plan_dimensions};
+use dith_core::preprocess::{FitMode, PreprocessOptions, plan_dimensions};
 use dith_core::preset::{OverwritePolicy, PresetScope, SavePresetRequest, save_local_preset};
 use dith_core::recipe::{DitherRecipe, RecipeError};
 
 use super::shared::{emit_inline_kitty, list_image_files, load_input_image, palette_spec_label};
 use dith_core::overlay::check_overlay;
+
+/// Extra renders `--max-size` spends searching upward for the largest frame size that still fits,
+/// after the first shrink that fits.
+const MAX_SIZE_REFINE_STEPS: usize = 3;
 
 #[derive(Debug, Args)]
 pub struct AnimateArgs {
@@ -834,27 +838,37 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
         let limit_f = limit as f64;
         let mut size = bytes.len() as u64;
         let base = anim.output_dimensions;
+        let dims_at = |scale: f64| {
+            [
+                ((f64::from(base[0]) * scale).round() as u32).max(1),
+                ((f64::from(base[1]) * scale).round() as u32).max(1),
+            ]
+        };
+        let resize = |pre: &mut PreprocessOptions, [width, height]: [u32; 2]| {
+            if pre.width.is_none() || pre.height.is_none() {
+                pre.fit = FitMode::Stretch;
+            }
+            pre.width = Some(width);
+            pre.height = Some(height);
+            pre.max_dim = None;
+            pre.scale = None;
+        };
         let mut scale = 1.0f64;
+        let mut too_big = 1.0f64;
         // File size of dithered frames scales roughly with pixel area, so shrink both sides by
         // sqrt(limit / size) with a small safety margin and re-render until it fits.
         for _ in 0..8 {
             if size <= limit {
                 break;
             }
-            scale *= ((limit_f / size as f64).sqrt() * 0.95).clamp(0.3, 0.95);
-            let fit_w = ((f64::from(base[0]) * scale).round() as u32).max(1);
-            let fit_h = ((f64::from(base[1]) * scale).round() as u32).max(1);
-            if fit_w.min(fit_h) < 8 {
+            let shrink = ((limit_f / size as f64).sqrt() * 0.95).clamp(0.3, 0.95);
+            let dims = dims_at(scale * shrink);
+            if dims[0].min(dims[1]) < 8 {
                 break;
             }
-            let pre = &mut recipe.preprocess;
-            if pre.width.is_none() || pre.height.is_none() {
-                pre.fit = FitMode::Stretch;
-            }
-            pre.width = Some(fit_w);
-            pre.height = Some(fit_h);
-            pre.max_dim = None;
-            pre.scale = None;
+            too_big = scale;
+            scale *= shrink;
+            resize(&mut recipe.preprocess, dims);
             anim = dither_animation_frames(&raw_frames, &recipe, &anim_dither_opts)?;
             let next = encode(&anim)?;
             size = next.0.len() as u64;
@@ -869,6 +883,34 @@ pub(crate) fn handle_animate(args: &AnimateArgs, as_json: bool) -> Result<()> {
                 ),
             }
             .into());
+        }
+        // The safety margin usually lands well under the limit, so search upward between the
+        // largest scale that fits and the smallest that did not, keeping the largest fit.
+        if scale < 1.0 {
+            for _ in 0..MAX_SIZE_REFINE_STEPS {
+                if size * 100 >= limit * 99 {
+                    break;
+                }
+                let gap = too_big - scale;
+                let attempt = (scale * (limit_f / size as f64).sqrt() * 0.99)
+                    .clamp(scale + gap / 8.0, too_big - gap / 8.0);
+                let dims = dims_at(attempt);
+                if dims == dims_at(scale) || dims == dims_at(too_big) {
+                    break;
+                }
+                resize(&mut recipe.preprocess, dims);
+                let tried = dither_animation_frames(&raw_frames, &recipe, &anim_dither_opts)?;
+                let next = encode(&tried)?;
+                if next.0.len() as u64 <= limit {
+                    scale = attempt;
+                    size = next.0.len() as u64;
+                    anim = tried;
+                    encoded = Some(next);
+                } else {
+                    too_big = attempt;
+                }
+            }
+            resize(&mut recipe.preprocess, dims_at(scale));
         }
         size_fit_scale = Some(((scale * 1000.0).round() / 1000.0) as f32);
     }
