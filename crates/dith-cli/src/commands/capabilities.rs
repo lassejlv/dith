@@ -271,6 +271,27 @@ pub fn build_capabilities() -> CapabilitiesManifest {
                 effect: "Pre-dither Gaussian blur sigma to calm sensor noise",
             },
             ParameterRange {
+                flag: "--ink-below",
+                value_type: "f32",
+                range: "0.0..=1.0",
+                default: "off",
+                effect: "Tones darker than this luminance become solid ink (the darkest palette color) instead of dots",
+            },
+            ParameterRange {
+                flag: "--paper-above",
+                value_type: "f32",
+                range: "0.0..=1.0",
+                default: "off",
+                effect: "Tones lighter than this luminance stay clean paper (the lightest palette color), so skies get no stray dots",
+            },
+            ParameterRange {
+                flag: "--ink-lines",
+                value_type: "f32",
+                range: "0.0..=1.0",
+                default: "off (0)",
+                effect: "Finds the source's outlines and draws them as solid ink; higher values pick up fainter lines",
+            },
+            ParameterRange {
                 flag: "--auto-palette",
                 value_type: "usize",
                 range: "2..=64",

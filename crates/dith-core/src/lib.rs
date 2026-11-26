@@ -7,6 +7,7 @@
 //!   [`run_pipeline`], which preprocesses, resolves the palette, dithers and finalizes an image.
 //! - [`preprocess`], [`palette`], [`dither`] and [`color`]: the individual stages, usable on
 //!   their own (for example [`dither_image`] with an explicit [`Palette`]).
+//! - [`ink`]: solid ink, clean paper and outline masks layered over any dither ([`SolidInk`]).
 //! - [`preset`]: built-in and saved presets that seed a recipe.
 //! - [`generate`] and [`animate`]: procedural sources and animated output.
 //! - [`output`]: encoders for PNG, WebP, JPEG, GIF, BMP, TIFF, SVG and text/terminal previews.
@@ -44,6 +45,7 @@ pub mod color;
 pub mod compare;
 pub mod dither;
 pub mod generate;
+pub mod ink;
 pub mod inspect;
 pub mod output;
 pub mod palette;
@@ -59,6 +61,7 @@ pub use image;
 pub use color::{ColorSpace, Rgb};
 pub use dither::{Algorithm, DitherOptions, dither_image};
 pub use generate::{GenerateOptions, Pattern, generate_pattern};
+pub use ink::SolidInk;
 pub use output::{ExportOptions, OutputFormat, encode_image};
 pub use palette::{Palette, PaletteError};
 pub use preprocess::PreprocessOptions;

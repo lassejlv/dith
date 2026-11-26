@@ -942,3 +942,104 @@ fn optimize_flag_shrinks_png_losslessly_and_round_trips_through_recipes() {
     generate(&["--recipe", &path("legacy.json")], &path("legacy.png"));
     assert_eq!(std::fs::read(path("legacy.png")).unwrap(), default_bytes);
 }
+
+#[test]
+fn solid_ink_flags_validate_reach_catalogs_and_round_trip_through_recipes() {
+    let dir = TempDir::new().unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    let (ok, _, err) = run_json(&[
+        "generate",
+        "sphere",
+        "--canvas-width",
+        "120",
+        "--canvas-height",
+        "90",
+        "-o",
+        &path("src.png"),
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+
+    for (flag, value) in [
+        ("--ink-below", "1.2"),
+        ("--paper-above", "-0.1"),
+        ("--ink-lines", "3"),
+    ] {
+        let (ok, _, err) = run_json(&[
+            "apply",
+            &path("src.png"),
+            "-o",
+            &path("bad.png"),
+            flag,
+            value,
+            "--dry-run",
+            "--json",
+        ]);
+        assert!(!ok);
+        assert_eq!(err["code"], "INVALID_ARGUMENT", "{flag}");
+        assert!(
+            err["message"].as_str().unwrap().contains("0.0..=1.0"),
+            "{err}"
+        );
+    }
+
+    let (ok, presets, _) = run_json(&["list", "presets", "--json"]);
+    assert!(ok);
+    let manga = presets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "manga")
+        .expect("manga preset is listed");
+    assert_eq!(manga["recipe"]["dither"]["algorithm"], "halftone");
+    assert!(manga["recipe"]["dither"]["ink_lines"].as_f64().unwrap() > 0.0);
+
+    let (ok, caps, _) = run_json(&["capabilities"]);
+    assert!(ok);
+    let flags: Vec<&str> = caps["parameter_ranges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["flag"].as_str())
+        .collect();
+    for flag in ["--ink-below", "--paper-above", "--ink-lines"] {
+        assert!(flags.contains(&flag), "capabilities lacks {flag}");
+    }
+
+    let (ok, report, err) = run_json(&[
+        "apply",
+        &path("src.png"),
+        "-o",
+        &path("manga.png"),
+        "--preset",
+        "manga",
+        "--ink-lines",
+        "0.8",
+        "--emit-recipe",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        report["recipe"]["dither"]["ink_below"].as_f64().unwrap() as f32,
+        0.22
+    );
+    assert_eq!(
+        report["recipe"]["dither"]["ink_lines"].as_f64().unwrap() as f32,
+        0.8
+    );
+    std::fs::write(path("manga.json"), report["recipe"].to_string()).unwrap();
+    let (ok, _, err) = run_json(&[
+        "apply",
+        &path("src.png"),
+        "-o",
+        &path("replayed.png"),
+        "--recipe",
+        &path("manga.json"),
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        std::fs::read(path("replayed.png")).unwrap(),
+        std::fs::read(path("manga.png")).unwrap()
+    );
+}

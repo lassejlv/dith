@@ -81,6 +81,16 @@ The resolution order is the recipe (`--recipe <path|->`), then the preset (`-P/-
 | `--pattern-scale` | 1..=32 cell size for ordered, halftone, line, and blue-noise screens | 1 |
 | `--seed` | u64 for blue-noise, random, ign, noise, and auto-palette | 42 |
 
+**Solid ink** (works with every algorithm; all off by default)
+
+| Flag | Range | Effect |
+| --- | --- | --- |
+| `--ink-below` | 0.0..=1.0 (0 = off) | Tones darker than this luminance become solid ink (the darkest palette color) instead of dots. |
+| `--paper-above` | 0.0..=1.0 (1 = off) | Tones lighter than this luminance stay clean paper (the lightest palette color). |
+| `--ink-lines` | 0.0..=1.0 (0 = off) | Finds outlines (pixels clearly darker than their blurred surroundings) and draws them as solid ink. Higher values pick up fainter lines. |
+
+Ink and paper are picked by Oklab lightness, so they also work with multi-color palettes. The masks come from the prepared source after resize and tone, so they are deterministic and hold still across animation frames in any `--temporal` mode. Recipes store them as `dither.ink_below`, `dither.paper_above` and `dither.ink_lines`, omitted when unset. With `compare --presets`, these three flags also override every preset tile.
+
 **Palette**
 
 Choose one source.

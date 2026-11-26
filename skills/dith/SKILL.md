@@ -42,6 +42,7 @@ Start from a preset, then override individual flags. Explicit flags always win o
 | Filmic stipple, no grid artifacts | `--preset film-stipple` (blue-noise) | Best general modern look; also stable in animation. |
 | Risograph poster | `--preset risograph`, `risograph-red`, `risograph-duo` | Duotone and two-drum overprint looks on warm paper. |
 | Comic / zine halftone | `--preset halftone-zine` | Pair with `--format svg --svg-shape circle` for vector dots. |
+| Manga / screentone from an illustration | `--preset manga` | Solid black outlines and shadows, halftone mid-tones, clean white highlights. Render at the final size and check a 1:1 crop. Tune with `--ink-below`, `--ink-lines`, `--paper-above`. |
 | Game Boy / pixel art | `--preset gameboy`, `pico8` | Ordered Bayer plus chunky `--pixel-size`. |
 | CRT / terminal glow | `--preset crt-amber`, `phosphor` | Dark-key images suit these best. |
 | Engraving / woodcut | `--preset woodcut`, `--algorithm crosshatch` | Line screens; tune with `--pattern-scale`. |
@@ -61,6 +62,7 @@ Start from a preset, then override individual flags. Explicit flags always win o
   - Nudging overall density: `--bias` (negative is darker, positive is lighter, range ±0.5).
 - **Size first.** Cap with `--max-dim` (or `--width`/`--height` plus `--fit contain|cover|stretch`). Dither patterns are per-pixel, so a dithered image must never be resized afterwards. Render at the final display size instead.
 - **Chunky pixels.** `--pixel-size N` downsamples, dithers, then nearest-upscales, so output dimensions are unchanged.
+- **Solid ink and clean paper.** Any algorithm dithers every tone into dots. For print looks (manga, comics, zines, woodcut, Risograph) add `--ink-below 0.15..0.3` so deep shadows print as solid ink, `--paper-above 0.85..0.95` so skies and highlights stay clean paper, and `--ink-lines 0.3..0.8` to trace the source's outlines in solid ink (higher picks up fainter lines). Ink is the darkest palette color and paper the lightest. Outlines need line art at a decent resolution; they are tuned for images around 3000 px wide and scale with size.
 - **Ordered screen size.** `--pattern-scale 2..4` enlarges Bayer, halftone, line, and blue-noise cells for bolder, more graphic texture.
 - **Color space.** Keep the default `oklab`. Use `srgb` only to mimic legacy hardware math; `linear` is physically linear light.
 - **Determinism.** Stochastic algorithms (`blue-noise`, `random`, `ign`), `--noise`, and `--auto-palette` use `--seed` (default 42). Change the seed for variations and keep it fixed for reproducibility.

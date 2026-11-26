@@ -12,6 +12,7 @@ Pass a preset with `--preset <id>` (or `-P`). Any explicit flag overrides the ma
 | `editorial-print` | ostromoukhov | newsprint | Silky monochrome on archival newsprint |
 | `film-stipple` | blue-noise | ink-cream | Artifact-free stipple in India ink and cream |
 | `halftone-zine` | halftone | newsprint | Bold 45° clustered-dot halftone |
+| `manga` | halftone | bw | Manga screentone: solid black outlines and shadows (`--ink-lines 0.5`, `--ink-below 0.22`), fine halftone mid-tones, clean white highlights (`--paper-above 0.92`) |
 | `risograph` | stucki | risograph-blue | Soy cobalt blue on cream stock |
 | `risograph-red` | stucki | risograph-red | High-impact red on warm uncoated stock |
 | `risograph-duo` | floyd-steinberg | risograph-duo | Cobalt and fluorescent pink two-drum overprint |
