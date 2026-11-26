@@ -5,6 +5,7 @@ pub(crate) mod apply;
 pub(crate) mod batch;
 pub(crate) mod capabilities;
 pub(crate) mod compare;
+pub(crate) mod diff;
 pub(crate) mod generate;
 pub(crate) mod inspect;
 pub(crate) mod list;
