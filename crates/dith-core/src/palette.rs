@@ -398,6 +398,16 @@ pub fn extract_adaptive_palette_from_frames(
     count: usize,
     seed: u64,
 ) -> Result<Palette, PaletteError> {
+    let frames: Vec<&RgbaImage> = frames.iter().collect();
+    extract_adaptive_palette_from_images(&frames, count, seed)
+}
+
+/// [`extract_adaptive_palette_from_frames`] over borrowed frames.
+pub(crate) fn extract_adaptive_palette_from_images(
+    frames: &[&RgbaImage],
+    count: usize,
+    seed: u64,
+) -> Result<Palette, PaletteError> {
     if count < 2 {
         return Err(PaletteError::TooFewColors { count });
     }
