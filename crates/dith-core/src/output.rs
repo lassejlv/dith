@@ -334,14 +334,23 @@ pub fn write_output_file(path: &Path, bytes: &[u8]) -> Result<()> {
 /// Paint class of pixels no SVG run may cover: transparent holes and the background color.
 const SVG_BARRIER: u32 = u32::MAX;
 
+/// Longest dash period (one run plus one gap, in pixels) traced as a dashed stroke.
+const SVG_MAX_DASH_PERIOD: u32 = 32;
+
+/// Bytes a dash pattern must first save on paper before it earns its own `<path>`.
+const SVG_DASH_PAYBACK: u32 = 64;
+
+/// Dash periods per `<path>`. Skia-based renderers refuse to dash a path beyond one million.
+const SVG_MAX_DASHES_PER_PATH: u32 = 50_000;
+
 /// Render a dithered image as a compact, crisp SVG.
 ///
-/// `Rect` mode strokes pixel runs as 1px-wide lines through the pixel centres, one `<path>`
-/// per color. Opaque colors are painted most frequent first and a run may pass under pixels a
-/// later color repaints, so runs merge; each color picks horizontal or vertical runs, whichever
-/// is shorter.
-/// Dot modes trace every dot as two filled semicircle arcs in one `<path>` per color. Colors use
-/// the shortest hex form, so files stay lean for web and design tooling.
+/// `Rect` mode strokes pixel runs as 1px-wide lines through the pixel centres. Opaque colors are
+/// painted most frequent first and a run may pass under pixels a later color repaints, so runs
+/// merge; each color picks horizontal or vertical runs, whichever is shorter, and evenly repeated
+/// runs collapse into dashed strokes. Dot modes trace every dot as two filled semicircle arcs in
+/// one `<path>` per color. Colors use the shortest hex form, so files stay lean for web and design
+/// tooling.
 #[must_use]
 pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
     let (w, h) = img.dimensions();
@@ -459,8 +468,7 @@ fn index_colors(img: &RgbaImage) -> IndexedColors {
 /// Stroke every pixel run of a `Rect` SVG, returning the `<g>` element (empty when nothing is drawn).
 ///
 /// Opaque colors become layers ordered by descending pixel count; translucent colors follow and
-/// keep their exact coverage. Each layer is traced along rows and along columns and keeps the
-/// shorter path. `skipped` marks colors that are never painted.
+/// keep their exact coverage. `skipped` marks colors that are never painted.
 fn svg_runs(
     w: u32,
     h: u32,
@@ -515,11 +523,6 @@ fn svg_runs(
 
     let mut out = String::from("<g fill=\"none\">");
     for ((across, down), &i) in across.iter().zip(&down).zip(&layers) {
-        let path = if down.d.len() < across.d.len() {
-            down
-        } else {
-            across
-        };
         let rgba = colors[i];
         let mut stroke = format!("stroke=\"{}\"", svg_hex([rgba[0], rgba[1], rgba[2]]));
         if rgba[3] < 255 {
@@ -531,7 +534,11 @@ fn svg_runs(
             };
             let _ = write!(stroke, " stroke-opacity=\"{opacity}\"");
         }
-        let _ = write!(out, "<path {stroke} d=\"{}\"/>", path.d);
+        if down.encoded_len() < across.encoded_len() {
+            down.write(&mut out, &stroke);
+        } else {
+            across.write(&mut out, &stroke);
+        }
     }
     out.push_str("</g>");
     out
@@ -548,12 +555,18 @@ fn trace_runs(
     opaque: u32,
     layers: usize,
     vertical: bool,
-) -> Vec<RunPath> {
-    let mut out: Vec<RunPath> = (0..layers).map(|_| RunPath::default()).collect();
+) -> Vec<RunLayer> {
+    let mut out: Vec<RunLayer> = (0..layers).map(|_| RunLayer::default()).collect();
+    let mut pending: Vec<Vec<(u32, u32)>> = vec![Vec::new(); layers];
+    let mut touched: Vec<u32> = Vec::new();
     let mut stack: Vec<(u32, u32, u32)> = Vec::new();
     for (row, line) in codes.chunks(length.max(1)).zip(0u32..) {
         let mut close = |(code, start, end): (u32, u32, u32)| {
-            out[code as usize].push(vertical, line, start, end - start);
+            let runs = &mut pending[code as usize];
+            if runs.is_empty() {
+                touched.push(code);
+            }
+            runs.push((start, end));
         };
         let mut previous = SVG_BARRIER;
         for (&code, end) in row.iter().zip(1u32..) {
@@ -579,8 +592,150 @@ fn trace_runs(
         while let Some(top) = stack.pop() {
             close(top);
         }
+        for code in touched.drain(..) {
+            let runs = &mut pending[code as usize];
+            out[code as usize].push_line(vertical, line, runs);
+            runs.clear();
+        }
     }
     out
+}
+
+/// The stroked paths of one color: plain runs plus one dashed path set per repeated run pattern.
+#[derive(Default)]
+struct RunLayer {
+    plain: RunPath,
+    dashes: Vec<DashRuns>,
+}
+
+/// Runs that repeat `on` pixels painted, `off` pixels skipped, stroked with a matching dash array.
+struct DashRuns {
+    on: u32,
+    off: u32,
+    saved: u32,
+    periods: u32,
+    path: RunPath,
+    full: Vec<String>,
+}
+
+impl RunLayer {
+    /// Add one line's runs (`start..end` pixel spans in ascending order).
+    fn push_line(&mut self, vertical: bool, line: u32, runs: &[(u32, u32)]) {
+        let mut i = 0;
+        while i < runs.len() {
+            let (start, end) = runs[i];
+            let on = end - start;
+            let off = runs.get(i + 1).map_or(u32::MAX, |next| next.0 - end);
+            let mut j = i;
+            if off <= SVG_MAX_DASH_PERIOD.saturating_sub(on) {
+                while let Some(&(s, e)) = runs.get(j + 1)
+                    && s - runs[j].1 == off
+                    && e - s == on
+                {
+                    j += 1;
+                }
+            }
+            let repeats = (j - i) as u32;
+            if repeats == 0 || !self.push_dashed(vertical, line, start, on, off, repeats) {
+                for &(start, end) in &runs[i..=j] {
+                    self.plain.push(vertical, line, start, end - start);
+                }
+            }
+            i = j + 1;
+        }
+    }
+
+    /// Stroke `repeats + 1` evenly spaced runs as one dashed line. Returns false while the pattern
+    /// has not yet proven it saves more than its `<path>` costs; the caller then strokes plain runs.
+    fn push_dashed(
+        &mut self,
+        vertical: bool,
+        line: u32,
+        start: u32,
+        on: u32,
+        off: u32,
+        repeats: u32,
+    ) -> bool {
+        let index = self
+            .dashes
+            .iter()
+            .position(|d| (d.on, d.off) == (on, off))
+            .unwrap_or_else(|| {
+                self.dashes.push(DashRuns {
+                    on,
+                    off,
+                    saved: 0,
+                    periods: 0,
+                    path: RunPath::default(),
+                    full: Vec::new(),
+                });
+                self.dashes.len() - 1
+            });
+        let dash = &mut self.dashes[index];
+        if dash.saved < SVG_DASH_PAYBACK {
+            let per_run = 4 + decimal_len(i64::from(off)) + decimal_len(i64::from(on));
+            dash.saved += (repeats * per_run as u32).saturating_sub(2);
+            return false;
+        }
+        if dash.periods + repeats + 1 > SVG_MAX_DASHES_PER_PATH && dash.periods > 0 {
+            dash.full.push(std::mem::take(&mut dash.path).d);
+            dash.periods = 0;
+        }
+        dash.periods += repeats + 1;
+        dash.path
+            .push(vertical, line, start, on + repeats * (on + off));
+        true
+    }
+
+    /// Bytes [`Self::write`] emits, close enough to compare the two run directions.
+    fn encoded_len(&self) -> usize {
+        let dashed = self.dashes.iter().flat_map(|dash| {
+            dash.full
+                .iter()
+                .chain([&dash.path.d])
+                .filter(|d| !d.is_empty())
+                .map(|d| d.len() + 40)
+        });
+        self.plain.d.len() + dashed.sum::<usize>()
+    }
+
+    /// Append this color's `<path>` elements, wrapped in a `<g>` when there are several.
+    fn write(&self, out: &mut String, stroke: &str) {
+        let mut paths: Vec<(String, &str)> = Vec::new();
+        if !self.plain.d.is_empty() {
+            paths.push((String::new(), &self.plain.d));
+        }
+        for dash in &self.dashes {
+            let array = if dash.on == dash.off {
+                format!(" stroke-dasharray=\"{}\"", dash.on)
+            } else {
+                format!(" stroke-dasharray=\"{} {}\"", dash.on, dash.off)
+            };
+            for d in dash.full.iter().chain([&dash.path.d]) {
+                if !d.is_empty() {
+                    paths.push((array.clone(), d));
+                }
+            }
+        }
+        let grouped = paths.len() > 1;
+        if grouped {
+            let _ = write!(out, "<g {stroke}>");
+        }
+        for (array, d) in paths {
+            out.push_str("<path");
+            if !grouped {
+                out.push(' ');
+                out.push_str(stroke);
+            }
+            out.push_str(&array);
+            out.push_str(" d=\"");
+            out.push_str(d);
+            out.push_str("\"/>");
+        }
+        if grouped {
+            out.push_str("</g>");
+        }
+    }
 }
 
 /// Path data for 1px-wide stroked runs, with the pen position after the last run.
@@ -1656,8 +1811,10 @@ mod tests {
                         "{name}: no run passes under a later color"
                     );
                 }
-                if name == "columns" {
-                    assert!(!svg.contains("h1") && svg.contains("v5"), "{svg}");
+                match name {
+                    "ordered" => assert!(svg.contains("stroke-dasharray"), "{svg}"),
+                    "columns" => assert!(!svg.contains("h1") && svg.contains("v5"), "{svg}"),
+                    _ => {}
                 }
             }
         }
