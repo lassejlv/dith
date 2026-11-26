@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Args;
 
-use crate::cli::DitherFlags;
+use crate::cli::{DitherFlags, OverlayFlags};
 use crate::viewer::{FullscreenViewerInput, ViewerBackend, run_fullscreen_viewer};
 use dith_core::color::Rgb;
 use dith_core::generate::{GenerateOptions, Pattern, generate_pattern};
@@ -88,11 +88,15 @@ pub struct GenerateArgs {
     pub fullscreen: bool,
 
     #[command(flatten)]
+    pub overlay: OverlayFlags,
+
+    #[command(flatten)]
     pub flags: DitherFlags,
 }
 
 pub(crate) fn handle_generate(args: &GenerateArgs, as_json: bool) -> Result<()> {
     let mut recipe = args.flags.resolve_recipe_for(true, true)?;
+    args.overlay.apply(&mut recipe)?;
     let wants_view = args.view || args.fullscreen;
     let wants_fullscreen = wants_view && !args.inline;
     let format = resolve_output_format(args.output.as_deref(), recipe.export.format, wants_view)?;

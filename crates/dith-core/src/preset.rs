@@ -143,6 +143,7 @@ impl Preset {
                 ..PreprocessOptions::default()
             },
             export: crate::output::ExportOptions::default(),
+            overlay: crate::overlay::OverlayOptions::default(),
         }
     }
 }
@@ -305,6 +306,8 @@ pub fn save_local_preset(
 
     let mut recipe = req.recipe;
     recipe.preset = Some(id.clone());
+    // A preset is a reusable style: overlay files belong to one picture, so only their inking stays.
+    recipe.overlay.layers.clear();
     let name = req
         .title
         .map(str::trim)

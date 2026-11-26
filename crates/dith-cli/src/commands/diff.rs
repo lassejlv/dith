@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args;
 use image::RgbaImage;
 use serde::Serialize;
@@ -13,6 +13,8 @@ use dith_core::diff::{ImageDiff, changed_mask, diff_from_mask, highlight_changes
 use dith_core::input::{image_dimensions, load_image};
 use dith_core::output::{encode_png_bytes, write_output_file};
 use dith_core::recipe::RecipeError;
+
+use super::shared::list_image_files;
 
 #[derive(Debug, Args)]
 pub struct DiffArgs {
@@ -230,27 +232,7 @@ fn diff_frames(args: &DiffArgs, anim: &Path, as_json: bool) -> Result<()> {
 /// Decode animation frames with their delays, or read a directory of frame images in name order.
 fn load_frames(path: &Path) -> Result<Vec<(RgbaImage, Option<u32>)>> {
     if path.is_dir() {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(path)
-            .with_context(|| format!("reading frames directory '{}'", path.display()))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-                    [
-                        "png", "gif", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "svg",
-                    ]
-                    .contains(&e.to_ascii_lowercase().as_str())
-                })
-            })
-            .collect();
-        files.sort();
-        if files.is_empty() {
-            return Err(RecipeError::Validation {
-                field: "frames",
-                reason: format!("'{}' holds no frame images", path.display()),
-            }
-            .into());
-        }
-        return files
+        return list_image_files(path)?
             .iter()
             .map(|f| Ok((load_image(f, None)?, None)))
             .collect();

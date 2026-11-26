@@ -12,6 +12,7 @@ use dith_core::color::{ColorSpace, Rgb};
 use dith_core::dither::Algorithm;
 use dith_core::ink::SolidInk;
 use dith_core::output::{OutputFormat, SvgShape};
+use dith_core::overlay::{OverlayAlpha, check_overlay};
 use dith_core::palette::Palette;
 use dith_core::preprocess::{AlphaMode, FitMode};
 use dith_core::recipe::{DitherRecipe, PaletteSpec, RecipeError};
@@ -443,6 +444,39 @@ impl DitherFlags {
         ink.ink_below = self.ink_below.or(ink.ink_below);
         ink.paper_above = self.paper_above.or(ink.paper_above);
         ink.ink_lines = self.ink_lines.or(ink.ink_lines);
+    }
+}
+
+/// Ink overlay flags shared by `apply`, `generate` and `animate`.
+#[derive(Debug, Clone, Args, Default)]
+pub struct OverlayFlags {
+    /// Ink overlay (SVG or PNG) composited after dithering as exact, undithered pixels: each pixel
+    /// snaps to the nearest palette color. Repeat to stack layers in order.
+    #[arg(long = "overlay", value_name = "SVG|PNG")]
+    pub overlays: Vec<PathBuf>,
+
+    /// Paint every drawn overlay pixel this hex color instead of snapping it to the palette.
+    #[arg(long, value_name = "HEX")]
+    pub overlay_color: Option<Rgb>,
+
+    /// How overlay transparency becomes pixels: threshold (hard cut at 50%, default) or dither (4x4 Bayer stipple).
+    #[arg(long, value_enum)]
+    pub overlay_alpha: Option<OverlayAlpha>,
+}
+
+impl OverlayFlags {
+    /// Layer explicit overlay flags over the recipe's overlays and check every layer file exists.
+    ///
+    /// # Errors
+    /// Returns [`RecipeError::InvalidAsset`] when an overlay file is missing or unreadable.
+    pub fn apply(&self, recipe: &mut DitherRecipe) -> Result<(), RecipeError> {
+        let overlay = &mut recipe.overlay;
+        if !self.overlays.is_empty() {
+            overlay.layers.clone_from(&self.overlays);
+        }
+        overlay.color = self.overlay_color.or(overlay.color);
+        overlay.alpha = self.overlay_alpha.unwrap_or(overlay.alpha);
+        overlay.layers.iter().try_for_each(|p| check_overlay(p))
     }
 }
 

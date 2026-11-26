@@ -140,7 +140,7 @@ mod tests {
         .unwrap();
         assert_eq!(image_dimensions(&path).unwrap(), (40, 20));
         let plan = PreprocessOptions {
-            max_dim: Some(80),
+            width: Some(80),
             ..PreprocessOptions::default()
         };
         let img = load_image(&path, Some(&plan)).unwrap();

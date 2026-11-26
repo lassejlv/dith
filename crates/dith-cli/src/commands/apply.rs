@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Args;
 
-use crate::cli::DitherFlags;
+use crate::cli::{DitherFlags, OverlayFlags};
 use crate::viewer::{FullscreenViewerInput, ViewerBackend, run_fullscreen_viewer};
 use dith_core::output::{OutputFormat, encode_image, render_braille};
 use dith_core::preprocess::plan_dimensions;
@@ -68,12 +68,16 @@ pub struct ApplyArgs {
     pub fullscreen: bool,
 
     #[command(flatten)]
+    pub overlay: OverlayFlags,
+
+    #[command(flatten)]
     pub flags: DitherFlags,
 }
 
 pub(crate) fn handle_apply(args: &ApplyArgs, as_json: bool) -> Result<()> {
     let reading_stdin = args.input.as_os_str() == "-";
-    let recipe = args.flags.resolve_recipe(!reading_stdin)?;
+    let mut recipe = args.flags.resolve_recipe(!reading_stdin)?;
+    args.overlay.apply(&mut recipe)?;
     let wants_view = args.view || args.fullscreen;
     let wants_fullscreen = wants_view && !args.inline;
 

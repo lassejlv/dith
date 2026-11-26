@@ -12,6 +12,7 @@ use thiserror::Error;
 use crate::color::Rgb;
 use crate::dither::{DitherOptions, dither_image};
 use crate::output::{ColorUsage, ExportOptions, color_histogram};
+use crate::overlay::{OverlayOptions, apply_overlays};
 use crate::palette::{Palette, PaletteError, builtin_palette_ids, extract_adaptive_palette};
 use crate::preprocess::{PreprocessOptions, finalize_image, prepare};
 use crate::preset::{PresetStoreError, UnknownPresetError, all_preset_ids, resolve_preset};
@@ -31,6 +32,12 @@ pub enum RecipeError {
     OutputExists { path: String },
     #[error("failed to parse JSON recipe: {0}")]
     InvalidRecipeJson(String),
+    #[error("cannot use {kind} '{path}': {reason}")]
+    InvalidAsset {
+        kind: &'static str,
+        path: String,
+        reason: String,
+    },
 }
 
 impl RecipeError {
@@ -53,6 +60,7 @@ impl RecipeError {
             Self::Validation { .. } => "INVALID_ARGUMENT",
             Self::OutputExists { .. } => "OUTPUT_EXISTS",
             Self::InvalidRecipeJson(_) => "INVALID_RECIPE_JSON",
+            Self::InvalidAsset { .. } => "INVALID_ASSET",
         }
     }
 
@@ -93,6 +101,9 @@ impl RecipeError {
             }
             Self::OutputExists { .. } => {
                 "Pass --overwrite to replace the existing file or choose a new -o path.".to_string()
+            }
+            Self::InvalidAsset { .. } => {
+                "Check the path exists and is a valid SVG or raster image (PNG, GIF, WebP, ...).".to_string()
             }
             Self::Validation { .. } | Self::InvalidRecipeJson(_) => {
                 "Run `dith capabilities` to inspect valid parameter names and value ranges."
@@ -152,6 +163,9 @@ pub struct DitherRecipe {
     pub dither: DitherOptions,
     pub preprocess: PreprocessOptions,
     pub export: ExportOptions,
+    /// Ink overlays composited after dithering (absent from JSON when unset).
+    #[serde(skip_serializing_if = "OverlayOptions::is_off")]
+    pub overlay: OverlayOptions,
 }
 
 impl DitherRecipe {
@@ -353,7 +367,13 @@ fn pipeline(src: Cow<'_, RgbaImage>, recipe: &DitherRecipe) -> Result<PipelineOu
 
     let palette = recipe.resolve_palette(&prepared.working)?;
     let dithered = dither_image(&prepared.working, &palette, &recipe.dither);
-    let final_img = finalize_image(dithered, &prepared, &recipe.preprocess);
+    let mut final_img = finalize_image(dithered, &prepared, &recipe.preprocess);
+    apply_overlays(
+        &mut final_img,
+        &recipe.overlay,
+        &palette,
+        recipe.preprocess.pixel_size,
+    )?;
     let histogram = color_histogram(&final_img);
 
     Ok(PipelineOutput {
@@ -393,7 +413,7 @@ mod tests {
     #[test]
     fn recipes_without_ink_fields_parse_as_off_and_serialize_without_them() {
         let json = serde_json::to_string(&DitherRecipe::default()).unwrap();
-        for key in ["ink_below", "paper_above", "ink_lines"] {
+        for key in ["ink_below", "paper_above", "ink_lines", "overlay"] {
             assert!(!json.contains(key), "default recipe JSON has {key}: {json}");
         }
         let parsed: DitherRecipe = serde_json::from_str(&json).unwrap();
