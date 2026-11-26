@@ -3,11 +3,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{self, Cursor, IsTerminal};
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use image::{DynamicImage, ImageFormat, RgbaImage};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::Rgb;
@@ -181,26 +183,77 @@ impl OutputFormat {
 /// Compute palette color usage histogram (opaque pixels) sorted by descending frequency.
 #[must_use]
 pub fn color_histogram(img: &RgbaImage) -> Vec<ColorUsage> {
-    let mut counts: BTreeMap<[u8; 3], u64> = BTreeMap::new();
-    let mut total = 0u64;
-    for px in img.pixels() {
-        if px[3] == 0 {
-            continue;
+    type Counts = HashMap<u32, u64, BuildHasherDefault<PixelKeyHasher>>;
+    let add = |mut into: Counts, from: Counts| {
+        for (key, pixels) in from {
+            *into.entry(key).or_insert(0) += pixels;
         }
-        *counts.entry([px[0], px[1], px[2]]).or_insert(0) += 1;
-        total += 1;
-    }
+        into
+    };
+    let counts = img
+        .as_raw()
+        .par_chunks(4 * 16_384)
+        .fold(Counts::default, |mut counts, chunk| {
+            // Dithered output repeats a few colors, so count runs before touching the map.
+            let mut run_key = 0u32;
+            let mut run = 0u64;
+            for px in chunk.as_chunks::<4>().0 {
+                if px[3] == 0 {
+                    continue;
+                }
+                let key = u32::from_be_bytes([0, px[0], px[1], px[2]]);
+                if key == run_key {
+                    run += 1;
+                } else {
+                    if run > 0 {
+                        *counts.entry(run_key).or_insert(0) += run;
+                    }
+                    run_key = key;
+                    run = 1;
+                }
+            }
+            if run > 0 {
+                *counts.entry(run_key).or_insert(0) += run;
+            }
+            counts
+        })
+        .reduce(Counts::default, add);
+    let total: u64 = counts.values().sum();
     let denom = total.max(1) as f64;
     let mut rows: Vec<ColorUsage> = counts
         .into_iter()
-        .map(|(rgb, pixels)| ColorUsage {
-            hex: Rgb::new(rgb[0], rgb[1], rgb[2]).to_hex(),
-            pixels,
-            percent: ((pixels as f64 / denom) * 10_000.0).round() / 100.0,
+        .map(|(key, pixels)| {
+            let [_, r, g, b] = key.to_be_bytes();
+            ColorUsage {
+                hex: Rgb::new(r, g, b).to_hex(),
+                pixels,
+                percent: ((pixels as f64 / denom) * 10_000.0).round() / 100.0,
+            }
         })
         .collect();
     rows.sort_by(|a, b| b.pixels.cmp(&a.pixels).then_with(|| a.hex.cmp(&b.hex)));
     rows
+}
+
+/// Hasher for packed `0x00RRGGBB` keys: one multiply, folded so every input bit reaches the
+/// low bits the table indexes by.
+#[derive(Default)]
+struct PixelKeyHasher(u64);
+
+impl Hasher for PixelKeyHasher {
+    fn finish(&self) -> u64 {
+        self.0 ^ (self.0 >> 29)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u32(u32::from(byte));
+        }
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.0 = (self.0 ^ u64::from(value)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
 }
 
 /// Encode `img` into raw bytes in the requested format.
@@ -881,6 +934,43 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_histogram_counts_and_orders_like_a_sorted_map() {
+        let mut state = 0x1234_5678_u32;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let img = RgbaImage::from_fn(333, 211, |_, _| {
+            let v = next();
+            // A handful of colors in runs, some stray ones, and transparent pixels.
+            let [a, b, c, d] = v.to_le_bytes();
+            let rgb = if a < 200 {
+                [b & 0xC0, 0x40, c & 0x80]
+            } else {
+                [b, c, d]
+            };
+            image::Rgba([rgb[0], rgb[1], rgb[2], if a % 7 == 0 { 0 } else { 255 }])
+        });
+        let mut reference: BTreeMap<[u8; 3], u64> = BTreeMap::new();
+        for px in img.pixels().filter(|px| px[3] != 0) {
+            *reference.entry([px[0], px[1], px[2]]).or_insert(0) += 1;
+        }
+        let mut expected: Vec<(String, u64)> = reference
+            .into_iter()
+            .map(|(rgb, n)| (Rgb::new(rgb[0], rgb[1], rgb[2]).to_hex(), n))
+            .collect();
+        expected.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let got: Vec<(String, u64)> = color_histogram(&img)
+            .into_iter()
+            .map(|row| (row.hex, row.pixels))
+            .collect();
+        assert_eq!(got, expected);
+    }
+
     use image::Rgba;
 
     #[test]
