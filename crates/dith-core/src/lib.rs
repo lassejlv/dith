@@ -53,6 +53,7 @@ pub mod preprocess;
 pub mod preset;
 pub mod recipe;
 
+mod nearest;
 mod png_optimize;
 mod webp;
 
