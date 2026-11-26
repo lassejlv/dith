@@ -290,6 +290,11 @@ pub fn encode_image(
         OutputFormat::Bmp => encode_bmp(img),
         OutputFormat::Tiff => encode_tiff(img),
         OutputFormat::Jpeg | OutputFormat::Gif => {
+            if matches!(format, OutputFormat::Gif)
+                && let Some(bytes) = crate::gif_lzw::encode_still(img)
+            {
+                return Ok(bytes);
+            }
             let dyn_img = if matches!(format, OutputFormat::Jpeg) {
                 DynamicImage::ImageRgba8(img.clone()).to_rgb8().into()
             } else {
