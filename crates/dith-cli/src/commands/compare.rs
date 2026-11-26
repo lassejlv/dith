@@ -15,7 +15,10 @@ use dith_core::dither::Algorithm;
 use dith_core::generate::{GenerateOptions, Pattern, generate_pattern};
 use dith_core::output::{ExportOptions, OutputFormat, encode_image, write_output_file};
 use dith_core::palette::Palette;
+use dith_core::preprocess::{FitMode, plan_dimensions};
 use dith_core::recipe::{DitherRecipe, PaletteSpec, RecipeError, run_pipeline};
+use dith_core::resample::resize_lanczos3;
+use image::RgbaImage;
 
 use super::shared::{emit_inline_kitty, load_input_image, palette_spec_label};
 
@@ -171,12 +174,8 @@ pub(crate) fn handle_compare(args: &CompareArgs, as_json: bool) -> Result<()> {
         }),
     };
 
-    // Render all variants in parallel via rayon.
-    let rendered: Result<
-        Vec<(String, DitherRecipe, dith_core::recipe::PipelineOutput)>,
-        RecipeError,
-    > = variant_specs
-        .into_par_iter()
+    let variant_specs: Vec<(String, DitherRecipe)> = variant_specs
+        .into_iter()
         .map(|(label, mut rec)| {
             if rec.preprocess.max_dim.is_none()
                 && rec.preprocess.width.is_none()
@@ -184,7 +183,47 @@ pub(crate) fn handle_compare(args: &CompareArgs, as_json: bool) -> Result<()> {
             {
                 rec.preprocess.max_dim = Some(args.tile_max_dim.max(32));
             }
-            let out = run_pipeline(&src_img, &rec)?;
+            (label, rec)
+        })
+        .collect();
+
+    // Variants usually shrink the source to the same tile size. Resize it once per size and run
+    // those variants on the result: prepare_image only copies an image that is already at its
+    // planned size, so their output is unchanged.
+    let tile_size = |rec: &DitherRecipe| {
+        let opts = &rec.preprocess;
+        let planned = plan_dimensions(src_img.width(), src_img.height(), opts);
+        let cover = matches!(
+            (opts.width, opts.height, opts.fit),
+            (Some(_), Some(_), FitMode::Cover)
+        );
+        (!cover
+            && planned != src_img.dimensions()
+            && plan_dimensions(planned.0, planned.1, opts) == planned)
+            .then_some(planned)
+    };
+    let mut sizes: Vec<(u32, u32)> = variant_specs
+        .iter()
+        .filter_map(|(_, rec)| tile_size(rec))
+        .collect();
+    sizes.sort_unstable();
+    sizes.dedup();
+    let tile_sources: Vec<((u32, u32), RgbaImage)> = sizes
+        .into_par_iter()
+        .map(|(w, h)| ((w, h), resize_lanczos3(&src_img, w, h)))
+        .collect();
+
+    // Render all variants in parallel via rayon.
+    let rendered: Result<
+        Vec<(String, DitherRecipe, dith_core::recipe::PipelineOutput)>,
+        RecipeError,
+    > = variant_specs
+        .into_par_iter()
+        .map(|(label, rec)| {
+            let source = tile_size(&rec)
+                .and_then(|size| tile_sources.iter().find(|(s, _)| *s == size))
+                .map_or(&src_img, |(_, img)| img);
+            let out = run_pipeline(source, &rec)?;
             Ok((label, rec, out))
         })
         .collect();
