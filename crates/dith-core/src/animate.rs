@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::color::Rgb;
+use crate::diff::count_changed_pixels;
 use crate::dither::dither_image;
 use crate::generate::{GenerateOptions, generate_pattern};
 use crate::output::{
@@ -417,6 +418,8 @@ pub struct AnimatedOutput {
     pub source_dimensions: [u32; 2],
     pub output_dimensions: [u32; 2],
     pub histogram: Vec<ColorUsage>,
+    /// Pixels of each output frame that differ from the frame before it (`0` for the first).
+    pub changed_pixels: Vec<u64>,
     pub elapsed_ms: u128,
 }
 
@@ -547,17 +550,19 @@ fn convert_image_frames(
         .collect()
 }
 
-/// Append reversed interior frames so an animation loops back and forth seamlessly.
-pub fn apply_ping_pong(frames: &mut Vec<AnimFrame>) {
+/// Append reversed interior frames so an animation loops back and forth seamlessly. Generic so
+/// per-frame side data (delays, overlay choices) can follow the same order as the frames.
+pub fn apply_ping_pong<T: Clone>(frames: &mut Vec<T>) {
     if frames.len() <= 2 {
         return;
     }
-    let tail: Vec<AnimFrame> = frames[1..frames.len() - 1].iter().rev().cloned().collect();
+    let tail: Vec<T> = frames[1..frames.len() - 1].iter().rev().cloned().collect();
     frames.extend(tail);
 }
 
 /// Duplicate the first and/or last frame to create crisp hold/dwell pauses at loop boundaries.
-pub fn apply_holds(frames: &mut Vec<AnimFrame>, hold_start: usize, hold_end: usize) {
+/// Each extra copy keeps that frame's own delay, so a hold lasts `count x delay`.
+pub fn apply_holds<T: Clone>(frames: &mut Vec<T>, hold_start: usize, hold_end: usize) {
     if frames.is_empty() {
         return;
     }
@@ -745,6 +750,14 @@ pub fn dither_animation_frames(
         dithered_frames[0].image.height(),
     ];
     let histogram = color_histogram(&dithered_frames[0].image);
+    let changed_pixels = std::iter::once(0)
+        .chain(
+            dithered_frames
+                .par_windows(2)
+                .map(|pair| count_changed_pixels(&pair[0].image, &pair[1].image))
+                .collect::<Vec<_>>(),
+        )
+        .collect();
 
     Ok(AnimatedOutput {
         frames: dithered_frames,
@@ -752,6 +765,7 @@ pub fn dither_animation_frames(
         source_dimensions,
         output_dimensions,
         histogram,
+        changed_pixels,
         elapsed_ms: started.elapsed().as_millis(),
     })
 }
@@ -905,7 +919,7 @@ pub fn encode_gif(
                 .collect();
 
             for (mut gf, frame) in lzw_frames.into_iter().zip(frames) {
-                gf.delay = ((frame.delay_ms + 5) / 10).clamp(2, u32::from(u16::MAX)) as u16;
+                gf.delay = gif_delay_centis(frame.delay_ms);
                 gf.dispose = if has_transparency {
                     gif::DisposalMethod::Background
                 } else {
@@ -919,7 +933,7 @@ pub fn encode_gif(
             for frame in frames {
                 let mut rgba = frame.image.as_raw().clone();
                 let mut gf = gif::Frame::from_rgba_speed(w, h, &mut rgba, 10);
-                gf.delay = ((frame.delay_ms + 5) / 10).clamp(2, u32::from(u16::MAX)) as u16;
+                gf.delay = gif_delay_centis(frame.delay_ms);
                 gf.dispose = gif::DisposalMethod::Background;
                 encoder.write_frame(&gf).context("writing GIF frame")?;
             }
@@ -927,6 +941,13 @@ pub fn encode_gif(
     }
 
     Ok(out)
+}
+
+/// GIF frame delay in centiseconds for a delay in milliseconds: GIF stores 10 ms steps, and
+/// browsers stretch anything under 20 ms, so delays round to the nearest step with a 20 ms floor.
+#[must_use]
+pub fn gif_delay_centis(delay_ms: u32) -> u16 {
+    ((delay_ms + 5) / 10).clamp(2, u32::from(u16::MAX)) as u16
 }
 
 /// Build a GIF sub-frame holding only the bounding box of pixels that differ from `prev`.
