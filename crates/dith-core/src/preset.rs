@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::color::ColorSpace;
 use crate::dither::{Algorithm, DitherOptions};
+use crate::ink::SolidInk;
 use crate::preprocess::PreprocessOptions;
 use crate::recipe::{DitherRecipe, PaletteSpec};
 
@@ -109,6 +110,8 @@ pub struct Preset {
     pub sharpen: f32,
     pub auto_levels: bool,
     pub grayscale: bool,
+    #[serde(flatten)]
+    pub ink: SolidInk,
 }
 
 impl Preset {
@@ -128,6 +131,7 @@ impl Preset {
                 strength: self.strength,
                 serpentine: self.serpentine,
                 pattern_scale: self.pattern_scale,
+                ink: self.ink,
                 ..DitherOptions::default()
             },
             preprocess: PreprocessOptions {
@@ -570,6 +574,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.6,
         auto_levels: true,
         grayscale: true,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "editorial-print",
@@ -587,6 +592,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.25,
         auto_levels: true,
         grayscale: true,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "film-stipple",
@@ -604,6 +610,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.2,
         auto_levels: true,
         grayscale: true,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "risograph",
@@ -621,6 +628,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.35,
         auto_levels: true,
         grayscale: true,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "risograph-red",
@@ -638,6 +646,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.4,
         auto_levels: true,
         grayscale: true,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "risograph-duo",
@@ -655,6 +664,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.3,
         auto_levels: true,
         grayscale: false,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "gameboy",
@@ -672,6 +682,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.25,
         auto_levels: true,
         grayscale: true,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "crt-amber",
@@ -689,6 +700,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.2,
         auto_levels: true,
         grayscale: true,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "phosphor",
@@ -706,6 +718,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.2,
         auto_levels: true,
         grayscale: true,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "blueprint",
@@ -723,6 +736,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.7,
         auto_levels: true,
         grayscale: true,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "halftone-zine",
@@ -740,6 +754,29 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.4,
         auto_levels: true,
         grayscale: true,
+        ink: SolidInk::OFF,
+    },
+    Preset {
+        id: "manga",
+        name: "Manga Screentone",
+        description: "Solid black ink outlines and shadows over a fine halftone screentone, with clean white highlights",
+        tags: &["manga", "comic", "halftone", "ink", "print", "bold"],
+        algorithm: Algorithm::Halftone,
+        palette: PresetPalette::Builtin("bw"),
+        color_space: ColorSpace::Oklab,
+        serpentine: false,
+        strength: 1.0,
+        pixel_size: 1,
+        pattern_scale: 1,
+        contrast: 0.15,
+        sharpen: 0.4,
+        auto_levels: false,
+        grayscale: true,
+        ink: SolidInk {
+            ink_below: Some(0.22),
+            paper_above: Some(0.92),
+            ink_lines: Some(0.5),
+        },
     },
     Preset {
         id: "woodcut",
@@ -757,6 +794,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.4,
         auto_levels: true,
         grayscale: false,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "lo-fi-photo",
@@ -774,6 +812,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.2,
         auto_levels: false,
         grayscale: false,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "vapor-mesh",
@@ -791,6 +830,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.0,
         auto_levels: false,
         grayscale: false,
+        ink: SolidInk::OFF,
     },
     Preset {
         id: "pico8",
@@ -808,6 +848,7 @@ const PRESETS: &[Preset] = &[
         sharpen: 0.2,
         auto_levels: false,
         grayscale: false,
+        ink: SolidInk::OFF,
     },
 ];
 

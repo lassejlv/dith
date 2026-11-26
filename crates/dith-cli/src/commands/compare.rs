@@ -315,6 +315,7 @@ fn build_compare_variants(
                     rec.strip_photo_prep();
                 }
                 rec.export.optimize |= base.export.optimize;
+                args.flags.apply_ink_overrides(&mut rec.dither.ink);
                 Ok((rec.preset.clone().unwrap_or_else(|| name.clone()), rec))
             })
             .collect();

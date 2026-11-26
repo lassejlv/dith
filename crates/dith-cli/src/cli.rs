@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use dith_core::color::{ColorSpace, Rgb};
 use dith_core::dither::Algorithm;
+use dith_core::ink::SolidInk;
 use dith_core::output::{OutputFormat, SvgShape};
 use dith_core::palette::Palette;
 use dith_core::preprocess::{AlphaMode, FitMode};
@@ -140,6 +141,18 @@ pub struct DitherFlags {
     /// Deterministic PRNG seed (for blue-noise/random/ign/noise/auto-palette).
     #[arg(long)]
     pub seed: Option<u64>,
+
+    /// Tones darker than this luminance become solid ink, the darkest palette color (0.0..=1.0, 0 = off).
+    #[arg(long, allow_hyphen_values = true)]
+    pub ink_below: Option<f32>,
+
+    /// Tones lighter than this luminance stay clean paper, the lightest palette color (0.0..=1.0, 1 = off).
+    #[arg(long, allow_hyphen_values = true)]
+    pub paper_above: Option<f32>,
+
+    /// Find the source's outlines and draw them as solid ink (0.0..=1.0, higher picks up fainter lines, 0 = off).
+    #[arg(long, allow_hyphen_values = true)]
+    pub ink_lines: Option<f32>,
 
     /// Chunky pixel block size (1..=64: downscales by N, dithers, then nearest-upscales).
     #[arg(long)]
@@ -336,6 +349,7 @@ impl DitherFlags {
         if let Some(seed) = self.seed {
             recipe.dither.seed = seed;
         }
+        self.apply_ink_overrides(&mut recipe.dither.ink);
 
         // Apply explicit preprocess overrides.
         if let Some(ps) = self.pixel_size {
@@ -419,6 +433,13 @@ impl DitherFlags {
 
         recipe.validate()?;
         Ok(recipe)
+    }
+
+    /// Layer explicit `--ink-below`, `--paper-above` and `--ink-lines` over `ink`.
+    pub fn apply_ink_overrides(&self, ink: &mut SolidInk) {
+        ink.ink_below = self.ink_below.or(ink.ink_below);
+        ink.paper_above = self.paper_above.or(ink.paper_above);
+        ink.ink_lines = self.ink_lines.or(ink.ink_lines);
     }
 }
 

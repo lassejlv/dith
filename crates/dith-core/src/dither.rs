@@ -7,6 +7,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::{ColorSpace, LinearRgb, Rgb, srgb_u8_to_linear};
+use crate::ink::{SolidInk, apply_solid_ink};
 use crate::palette::{Palette, SplitMix64};
 
 /// All supported dithering algorithms.
@@ -411,6 +412,9 @@ pub struct DitherOptions {
     pub pattern_offset: [u32; 2],
     /// Deterministic PRNG seed for stochastic algorithms and `--noise`.
     pub seed: u64,
+    /// Solid ink, clean paper and outline settings layered over the dither (all off by default).
+    #[serde(flatten)]
+    pub ink: SolidInk,
 }
 
 impl Default for DitherOptions {
@@ -425,6 +429,7 @@ impl Default for DitherOptions {
             pattern_scale: 1,
             pattern_offset: [0, 0],
             seed: 42,
+            ink: SolidInk::OFF,
         }
     }
 }
@@ -432,7 +437,7 @@ impl Default for DitherOptions {
 /// Run the selected dithering algorithm on `img` using `palette` and `opts`.
 #[must_use]
 pub fn dither_image(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) -> RgbaImage {
-    match opts.algorithm {
+    let mut out = match opts.algorithm {
         Algorithm::FloydSteinberg => diffuse_kernel(img, palette, opts, &FLOYD_STEINBERG, 16.0),
         Algorithm::Atkinson => diffuse_kernel(img, palette, opts, &ATKINSON, 8.0),
         Algorithm::JarvisJudiceNinke => diffuse_kernel(img, palette, opts, &JJN, 48.0),
@@ -457,7 +462,9 @@ pub fn dither_image(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) ->
         Algorithm::Random => stochastic_dither(img, palette, opts, StochasticKind::Random),
         Algorithm::Riemersma => riemersma_dither(img, palette, opts),
         Algorithm::Threshold => threshold_dither(img, palette, opts),
-    }
+    };
+    apply_solid_ink(img, &mut out, palette, &opts.ink);
+    out
 }
 
 struct DiffusionTap {
@@ -1581,6 +1588,67 @@ mod tests {
                     "algorithm {algo:?} emitted non-palette color {rgb}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn solid_ink_forces_darkest_and_lightest_colors_for_every_algorithm() {
+        let src = gradient_image(48, 32);
+        let palette = Palette::by_name("gray4").unwrap();
+        let (ink, paper) = crate::ink::ink_and_paper(&palette);
+        let settings = SolidInk {
+            ink_below: Some(0.3),
+            paper_above: Some(0.7),
+            ink_lines: Some(0.5),
+        };
+        let masks = crate::ink::InkMasks::compute(&src, &settings);
+        assert!(masks.ink.contains(&true) && masks.paper.contains(&true));
+
+        for &algo in Algorithm::ALL {
+            let opts = DitherOptions {
+                algorithm: algo,
+                ink: settings,
+                ..Default::default()
+            };
+            let out = dither_image(&src, &palette, &opts);
+            for ((px, &is_ink), &is_paper) in out.pixels().zip(&masks.ink).zip(&masks.paper) {
+                let rgb = Rgb::new(px[0], px[1], px[2]);
+                if is_ink {
+                    assert_eq!(rgb, ink, "algorithm {algo:?}");
+                } else if is_paper {
+                    assert_eq!(rgb, paper, "algorithm {algo:?}");
+                }
+            }
+            assert_eq!(
+                out,
+                dither_image(&src, &palette, &opts),
+                "algorithm {algo:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn neutral_solid_ink_values_leave_every_algorithm_unchanged() {
+        let src = gradient_image(48, 32);
+        let palette = Palette::by_name("gameboy").unwrap();
+        for &algo in Algorithm::ALL {
+            let off = DitherOptions {
+                algorithm: algo,
+                ..Default::default()
+            };
+            let neutral = DitherOptions {
+                ink: SolidInk {
+                    ink_below: Some(0.0),
+                    paper_above: Some(1.0),
+                    ink_lines: Some(0.0),
+                },
+                ..off.clone()
+            };
+            assert_eq!(
+                dither_image(&src, &palette, &off),
+                dither_image(&src, &palette, &neutral),
+                "algorithm {algo:?}"
+            );
         }
     }
 

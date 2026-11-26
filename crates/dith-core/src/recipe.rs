@@ -245,6 +245,21 @@ impl DitherRecipe {
                 reason: format!("must be in 0.0..=20.0 (got {})", self.preprocess.blur),
             });
         }
+        let ink = &self.dither.ink;
+        for (field, value) in [
+            ("ink-below", ink.ink_below),
+            ("paper-above", ink.paper_above),
+            ("ink-lines", ink.ink_lines),
+        ] {
+            if let Some(v) = value
+                && !(0.0..=1.0).contains(&v)
+            {
+                return Err(RecipeError::Validation {
+                    field,
+                    reason: format!("must be in 0.0..=1.0 (got {v})"),
+                });
+            }
+        }
         if let PaletteSpec::Adaptive(n) = self.palette
             && !(2..=64).contains(&n)
         {
@@ -336,4 +351,91 @@ pub fn run_pipeline(src: &RgbaImage, recipe: &DitherRecipe) -> Result<PipelineOu
         histogram,
         elapsed_ms: started.elapsed().as_millis(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use image::Rgba;
+
+    use super::*;
+    use crate::preset::all_presets;
+
+    fn illustration() -> RgbaImage {
+        RgbaImage::from_fn(160, 120, |x, y| {
+            let v = if (70..74).contains(&x) || (30..33).contains(&y) {
+                10
+            } else if x < 30 {
+                25
+            } else {
+                (60 + x + y / 2).min(255) as u8
+            };
+            Rgba([v, v, v, 255])
+        })
+    }
+
+    #[test]
+    fn recipes_without_ink_fields_parse_as_off_and_serialize_without_them() {
+        let json = serde_json::to_string(&DitherRecipe::default()).unwrap();
+        for key in ["ink_below", "paper_above", "ink_lines"] {
+            assert!(!json.contains(key), "default recipe JSON has {key}: {json}");
+        }
+        let parsed: DitherRecipe = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, DitherRecipe::default());
+
+        for preset in all_presets().iter().filter(|p| p.id != "manga") {
+            assert_eq!(
+                preset.ink,
+                crate::ink::SolidInk::OFF,
+                "preset {}",
+                preset.id
+            );
+        }
+    }
+
+    #[test]
+    fn ink_fields_round_trip_and_reject_out_of_range_values() {
+        let recipe = DitherRecipe::from_preset("manga").unwrap();
+        let json = serde_json::to_string(&recipe).unwrap();
+        assert!(json.contains("\"ink_below\":0.22"), "{json}");
+        assert_eq!(serde_json::from_str::<DitherRecipe>(&json).unwrap(), recipe);
+
+        for (field, value) in [
+            ("ink-below", -0.1),
+            ("paper-above", 1.5),
+            ("ink-lines", 2.0),
+        ] {
+            let mut bad = recipe.clone();
+            match field {
+                "ink-below" => bad.dither.ink.ink_below = Some(value),
+                "paper-above" => bad.dither.ink.paper_above = Some(value),
+                _ => bad.dither.ink.ink_lines = Some(value),
+            }
+            let err = bad.validate().unwrap_err();
+            assert_eq!(err.code(), "INVALID_ARGUMENT");
+            assert!(
+                matches!(&err, RecipeError::Validation { field: f, reason } if *f == field && reason.contains("0.0..=1.0")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn manga_renders_deterministically_with_solid_ink_and_clean_paper() {
+        let src = illustration();
+        let recipe = DitherRecipe::from_preset("manga").unwrap();
+        let first = run_pipeline(&src, &recipe).unwrap().image;
+        let second = run_pipeline(&src, &recipe).unwrap().image;
+        assert_eq!(first.as_raw(), second.as_raw());
+
+        let black = |x, y| first.get_pixel(x, y).0 == [0, 0, 0, 255];
+        assert!(
+            (0..20).all(|x| black(x, 60)),
+            "dark shadow should be solid ink"
+        );
+        assert!(
+            (40..120).all(|y| black(71, y)),
+            "outline should be solid ink"
+        );
+        assert!((150..160).all(|x| first.get_pixel(x, 110).0 == [255, 255, 255, 255]));
+    }
 }

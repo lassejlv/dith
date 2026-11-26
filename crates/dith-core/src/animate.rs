@@ -1314,6 +1314,53 @@ mod tests {
     }
 
     #[test]
+    fn solid_ink_masks_are_identical_on_every_frame_of_a_still() {
+        let still = RgbaImage::from_fn(80, 60, |x, y| {
+            let v = if (36..40).contains(&x) {
+                0
+            } else if y < 12 {
+                20
+            } else {
+                (90 + x * 2).min(255) as u8
+            };
+            Rgba([v, v, v, 255])
+        });
+        let raw = vec![
+            AnimFrame {
+                image: still.clone(),
+                delay_ms: 80,
+            };
+            6
+        ];
+        let recipe = DitherRecipe::from_preset("manga").unwrap();
+        let working = prepare_image(&still, &recipe.preprocess).working;
+        let masks = crate::ink::InkMasks::compute(&working, &recipe.dither.ink);
+        assert!(masks.ink.contains(&true) && masks.paper.contains(&true));
+
+        for temporal in [TemporalMode::Locked, TemporalMode::Boil] {
+            let anim_opts = AnimDitherOptions {
+                temporal,
+                ..Default::default()
+            };
+            let anim = dither_animation_frames(&raw, &recipe, &anim_opts).unwrap();
+            for (i, frame) in anim.frames.iter().enumerate() {
+                for ((px, &is_ink), &is_paper) in
+                    frame.image.pixels().zip(&masks.ink).zip(&masks.paper)
+                {
+                    if is_ink {
+                        assert_eq!(px.0, [0, 0, 0, 255], "{temporal:?} frame {i}");
+                    } else if is_paper {
+                        assert_eq!(px.0, [255, 255, 255, 255], "{temporal:?} frame {i}");
+                    }
+                }
+                if temporal == TemporalMode::Locked {
+                    assert_eq!(frame.image, anim.frames[0].image, "locked frame {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn apng_rejects_mixed_frame_sizes() {
         let frames = [(16, 16), (32, 16)].map(|(w, h)| AnimFrame {
             image: RgbaImage::new(w, h),
