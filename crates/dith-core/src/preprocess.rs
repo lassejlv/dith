@@ -1,7 +1,8 @@
 //! Image resizing, tonal adjustment, sharpening/blurring, and alpha handling before dithering.
 
+use image::RgbaImage;
 use image::imageops::{self, FilterType};
-use image::{Rgba, RgbaImage};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::{Rgb, linear_to_srgb_u8, srgb_u8_to_linear};
@@ -267,23 +268,25 @@ fn resize_cover(src: &RgbaImage, target_w: u32, target_h: u32) -> RgbaImage {
 
 fn flatten_alpha(img: &mut RgbaImage, bg: Rgb) {
     let bg_lin = bg.to_linear();
-    for px in img.pixels_mut() {
-        let a = f32::from(px[3]) / 255.0;
-        if a >= 0.999 {
-            px[3] = 255;
-            continue;
+    img.as_mut().par_chunks_mut(4 * 4096).for_each(|chunk| {
+        for px in chunk.as_chunks_mut::<4>().0 {
+            let a = f32::from(px[3]) / 255.0;
+            if a >= 0.999 {
+                px[3] = 255;
+                continue;
+            }
+            let inv = 1.0 - a;
+            let r = srgb_u8_to_linear(px[0]) * a + bg_lin.r * inv;
+            let g = srgb_u8_to_linear(px[1]) * a + bg_lin.g * inv;
+            let b = srgb_u8_to_linear(px[2]) * a + bg_lin.b * inv;
+            *px = [
+                linear_to_srgb_u8(r),
+                linear_to_srgb_u8(g),
+                linear_to_srgb_u8(b),
+                255,
+            ];
         }
-        let inv = 1.0 - a;
-        let r = srgb_u8_to_linear(px[0]) * a + bg_lin.r * inv;
-        let g = srgb_u8_to_linear(px[1]) * a + bg_lin.g * inv;
-        let b = srgb_u8_to_linear(px[2]) * a + bg_lin.b * inv;
-        *px = Rgba([
-            linear_to_srgb_u8(r),
-            linear_to_srgb_u8(g),
-            linear_to_srgb_u8(b),
-            255,
-        ]);
-    }
+    });
 }
 
 fn apply_unsharp_mask(img: &mut RgbaImage, amount: f32) {
@@ -295,68 +298,83 @@ fn apply_unsharp_mask(img: &mut RgbaImage, amount: f32) {
     }
     let src = img.as_raw();
     let mut horiz = vec![0u8; w * h * 3];
-
-    for y in 0..h {
-        let row_src = y * w * 4;
-        let row_dst = y * w * 3;
-        for x in 0..w {
-            let xm = x.saturating_sub(1);
-            let xp = (x + 1).min(w - 1);
-            let i0 = row_src + xm * 4;
-            let i1 = row_src + x * 4;
-            let i2 = row_src + xp * 4;
-            let o = row_dst + x * 3;
-            for c in 0..3 {
-                let sum =
-                    u16::from(src[i0 + c]) + u16::from(src[i1 + c]) * 2 + u16::from(src[i2 + c]);
-                horiz[o + c] = ((sum + 2) >> 2) as u8;
+    horiz
+        .par_chunks_mut(w * 3)
+        .zip(src.par_chunks(w * 4))
+        .for_each(|(row_dst, row_src)| {
+            for x in 0..w {
+                let i0 = x.saturating_sub(1) * 4;
+                let i1 = x * 4;
+                let i2 = (x + 1).min(w - 1) * 4;
+                for c in 0..3 {
+                    let sum = u16::from(row_src[i0 + c])
+                        + u16::from(row_src[i1 + c]) * 2
+                        + u16::from(row_src[i2 + c]);
+                    row_dst[x * 3 + c] = ((sum + 2) >> 2) as u8;
+                }
             }
-        }
-    }
+        });
 
-    let dst = img.as_mut();
-    for y in 0..h {
-        let ym = y.saturating_sub(1);
-        let yp = (y + 1).min(h - 1);
-        let r0 = ym * w * 3;
-        let r1 = y * w * 3;
-        let r2 = yp * w * 3;
-        let rd = y * w * 4;
-        for x in 0..w {
-            let h0 = r0 + x * 3;
-            let h1 = r1 + x * 3;
-            let h2 = r2 + x * 3;
-            let d = rd + x * 4;
-            for c in 0..3 {
-                let blurred = f32::from(
-                    (u16::from(horiz[h0 + c])
-                        + u16::from(horiz[h1 + c]) * 2
-                        + u16::from(horiz[h2 + c])
-                        + 2)
-                        >> 2,
-                );
-                let orig = f32::from(dst[d + c]);
-                let sharp = orig + (orig - blurred) * amount;
-                dst[d + c] = sharp.clamp(0.0, 255.0).round() as u8;
+    // The sharpened value depends only on the original and blurred bytes, so it is tabulated with
+    // exactly the per-pixel expression: `sharpened[orig * 256 + blurred]`.
+    let sharpened: Vec<u8> = (0..=u16::MAX)
+        .map(|i| {
+            let [orig, blurred] = i.to_be_bytes().map(f32::from);
+            let sharp = orig + (orig - blurred) * amount;
+            sharp.clamp(0.0, 255.0).round() as u8
+        })
+        .collect();
+
+    img.as_mut()
+        .par_chunks_mut(w * 4)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let r0 = &horiz[y.saturating_sub(1) * w * 3..][..w * 3];
+            let r1 = &horiz[y * w * 3..][..w * 3];
+            let r2 = &horiz[(y + 1).min(h - 1) * w * 3..][..w * 3];
+            for x in 0..w {
+                for c in 0..3 {
+                    let h = x * 3 + c;
+                    let blurred =
+                        (u16::from(r0[h]) + u16::from(r1[h]) * 2 + u16::from(r2[h]) + 2) >> 2;
+                    let d = x * 4 + c;
+                    row[d] = sharpened[usize::from(row[d]) << 8 | usize::from(blurred)];
+                }
             }
-        }
-    }
+        });
 }
 
 fn apply_auto_levels(img: &mut RgbaImage) {
-    let mut hist = [0u32; 256];
-    let mut total = 0u32;
-    for px in img.pixels() {
-        if px[3] < 16 {
-            continue;
-        }
-        let luma =
-            (0.2126 * f32::from(px[0]) + 0.7152 * f32::from(px[1]) + 0.0722 * f32::from(px[2]))
-                .round()
-                .clamp(0.0, 255.0) as usize;
-        hist[luma] += 1;
-        total += 1;
-    }
+    let hist = img
+        .as_raw()
+        .par_chunks(4 * 16_384)
+        .fold(
+            || [0u32; 256],
+            |mut hist, chunk| {
+                for px in chunk.as_chunks::<4>().0 {
+                    if px[3] < 16 {
+                        continue;
+                    }
+                    let luma = (0.2126 * f32::from(px[0])
+                        + 0.7152 * f32::from(px[1])
+                        + 0.0722 * f32::from(px[2]))
+                    .round()
+                    .clamp(0.0, 255.0) as usize;
+                    hist[luma] += 1;
+                }
+                hist
+            },
+        )
+        .reduce(
+            || [0u32; 256],
+            |mut a, b| {
+                for (into, from) in a.iter_mut().zip(b) {
+                    *into += from;
+                }
+                a
+            },
+        );
+    let total: u32 = hist.iter().sum();
     if total == 0 {
         return;
     }
@@ -387,12 +405,22 @@ fn apply_auto_levels(img: &mut RgbaImage) {
 
     let lo_f = f32::from(lo) / 255.0;
     let inv_span = 255.0 / f32::from(hi - lo);
-    for px in img.pixels_mut() {
-        for c in 0..3 {
-            let v = (f32::from(px[c]) / 255.0 - lo_f) * inv_span;
-            px[c] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let levels: [u8; 256] = std::array::from_fn(|v| {
+        let v = (f32::from(v as u8) / 255.0 - lo_f) * inv_span;
+        (v.clamp(0.0, 1.0) * 255.0).round() as u8
+    });
+    apply_channel_table(img, &levels);
+}
+
+/// Replace the R, G and B bytes of every pixel through `table`.
+fn apply_channel_table(img: &mut RgbaImage, table: &[u8; 256]) {
+    img.as_mut().par_chunks_mut(4 * 16_384).for_each(|chunk| {
+        for px in chunk.as_chunks_mut::<4>().0 {
+            px[0] = table[usize::from(px[0])];
+            px[1] = table[usize::from(px[1])];
+            px[2] = table[usize::from(px[2])];
         }
-    }
+    });
 }
 
 fn apply_tonal_adjustments(img: &mut RgbaImage, opts: &PreprocessOptions) {
@@ -411,48 +439,55 @@ fn apply_tonal_adjustments(img: &mut RgbaImage, opts: &PreprocessOptions) {
         opts.saturation.clamp(0.0, 3.0)
     };
 
-    for px in img.pixels_mut() {
-        let mut r = f32::from(px[0]) / 255.0;
-        let mut g = f32::from(px[1]) / 255.0;
-        let mut b = f32::from(px[2]) / 255.0;
-
+    // Brightness, contrast and gamma act on each channel alone, so they are tabulated per byte.
+    let curve: [f32; 256] = std::array::from_fn(|v| {
+        let v = f32::from(v as u8) / 255.0;
         // Brightness + contrast around 0.5 midpoint.
-        r = ((r - 0.5) * contrast_factor + 0.5 + brightness).clamp(0.0, 1.0);
-        g = ((g - 0.5) * contrast_factor + 0.5 + brightness).clamp(0.0, 1.0);
-        b = ((b - 0.5) * contrast_factor + 0.5 + brightness).clamp(0.0, 1.0);
-
+        let v = ((v - 0.5) * contrast_factor + 0.5 + brightness).clamp(0.0, 1.0);
         // Gamma.
         if (gamma - 1.0).abs() > 1e-4 {
-            r = r.powf(gamma);
-            g = g.powf(gamma);
-            b = b.powf(gamma);
+            v.powf(gamma)
+        } else {
+            v
         }
+    });
+    let finish = |v: f32| {
+        let v = if opts.invert { 1.0 - v } else { v };
+        (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    };
 
-        // Saturation / grayscale in linear light.
-        if (sat - 1.0).abs() > 1e-4 {
-            let lr = crate::color::srgb_f32_to_linear(r);
-            let lg = crate::color::srgb_f32_to_linear(g);
-            let lb = crate::color::srgb_f32_to_linear(b);
-            let y = 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
-            r = crate::color::linear_to_srgb_f32(y + (lr - y) * sat);
-            g = crate::color::linear_to_srgb_f32(y + (lg - y) * sat);
-            b = crate::color::linear_to_srgb_f32(y + (lb - y) * sat);
-        }
-
-        if opts.invert {
-            r = 1.0 - r;
-            g = 1.0 - g;
-            b = 1.0 - b;
-        }
-
-        px[0] = (r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        px[1] = (g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        px[2] = (b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    if (sat - 1.0).abs() <= 1e-4 {
+        apply_channel_table(img, &curve.map(finish));
+        return;
     }
+
+    // Saturation / grayscale in linear light.
+    let linear = curve.map(crate::color::srgb_f32_to_linear);
+    img.as_mut().par_chunks_mut(4 * 4096).for_each(|chunk| {
+        for px in chunk.as_chunks_mut::<4>().0 {
+            let lr = linear[usize::from(px[0])];
+            let lg = linear[usize::from(px[1])];
+            let lb = linear[usize::from(px[2])];
+            let y = 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
+            if sat == 0.0 {
+                // `y + (l - y) * 0.0` is exactly `y` for every channel: one conversion serves all three.
+                let v = finish(crate::color::linear_to_srgb_f32(y));
+                px[0] = v;
+                px[1] = v;
+                px[2] = v;
+            } else {
+                px[0] = finish(crate::color::linear_to_srgb_f32(y + (lr - y) * sat));
+                px[1] = finish(crate::color::linear_to_srgb_f32(y + (lg - y) * sat));
+                px[2] = finish(crate::color::linear_to_srgb_f32(y + (lb - y) * sat));
+            }
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
+    use image::Rgba;
+
     use super::*;
 
     #[test]
