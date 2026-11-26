@@ -112,6 +112,11 @@ pub fn build_capabilities() -> CapabilitiesManifest {
                 example: "dith batch img1.png img2.png --out-dir ./dithered --preset mac-classic --json",
             },
             CommandCapability {
+                name: "diff",
+                summary: "Count, box and highlight the pixels that differ between two images, or between consecutive frames of an animation (--frames), to prove an edit or animation only touches what it should.",
+                example: "dith diff --frames blink.gif --json",
+            },
+            CommandCapability {
                 name: "inspect",
                 summary: "Analyze dimensions, luminance percentiles, transparency, dominant hex colors, and recommended dithering commands.",
                 example: "dith inspect photo.png --json",

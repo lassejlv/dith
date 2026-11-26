@@ -1043,3 +1043,117 @@ fn solid_ink_flags_validate_reach_catalogs_and_round_trip_through_recipes() {
         std::fs::read(path("manga.png")).unwrap()
     );
 }
+
+#[test]
+fn diff_counts_boxes_and_highlights_changes_between_images_and_frames() {
+    let dir = TempDir::new().unwrap();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    let sphere = |out: &str, angle: &str| {
+        let (ok, _, err) = run_json(&[
+            "generate",
+            "sphere",
+            "-o",
+            &path(out),
+            "--canvas-width",
+            "64",
+            "--canvas-height",
+            "48",
+            "--angle",
+            angle,
+            "--algorithm",
+            "bayer4",
+            "--json",
+        ]);
+        assert!(ok, "{err}");
+    };
+    sphere("a.png", "135");
+    sphere("b.png", "100");
+
+    let (ok, same, err) = run_json(&["diff", &path("a.png"), &path("a.png"), "--json"]);
+    assert!(ok, "{err}");
+    assert_eq!(same["changed_pixels"], 0);
+    assert_eq!(same["bbox"], Value::Null);
+    assert_eq!(same["total_pixels"], 64 * 48);
+
+    let (ok, d, err) = run_json(&[
+        "diff",
+        &path("a.png"),
+        &path("b.png"),
+        "-o",
+        &path("hl.png"),
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    let changed = d["changed_pixels"].as_u64().unwrap();
+    assert!(changed > 0);
+    let bbox = &d["bbox"];
+    assert!(bbox["width"].as_u64().unwrap() <= 64);
+    let rows: u64 = d["changed_rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r[1].as_u64().unwrap() - r[0].as_u64().unwrap() + 1)
+        .sum();
+    assert!(rows <= bbox["height"].as_u64().unwrap());
+    let hl = image::open(path("hl.png")).unwrap().to_rgba8();
+    let red = hl.pixels().filter(|p| p.0 == [230, 40, 70, 255]).count() as u64;
+    assert_eq!(red, changed);
+
+    let (ok, _, err) = run_json(&[
+        "diff",
+        &path("a.png"),
+        &path("b.png"),
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    assert!(!std::path::Path::new(&path("never.png")).exists());
+
+    let tiny = image::RgbaImage::new(8, 8);
+    tiny.save(path("tiny.png")).unwrap();
+    let (ok, _, err) = run_json(&["diff", &path("a.png"), &path("tiny.png"), "--json"]);
+    assert!(!ok);
+    assert_eq!(err["code"], "INVALID_ARGUMENT");
+    let status = dith_bin()
+        .args(["diff", &path("a.png"), &path("tiny.png")])
+        .output()
+        .unwrap()
+        .status;
+    assert_eq!(status.code(), Some(2));
+
+    let (ok, _, err) = run_json(&[
+        "animate",
+        "sphere",
+        "-o",
+        &path("s.gif"),
+        "--frames",
+        "4",
+        "--canvas-width",
+        "64",
+        "--canvas-height",
+        "48",
+        "--algorithm",
+        "bayer4",
+        "--json",
+    ]);
+    assert!(ok, "{err}");
+    let (ok, frames, err) = run_json(&["diff", "--frames", &path("s.gif"), "--loop", "--json"]);
+    assert!(ok, "{err}");
+    assert_eq!(frames["frame_count"], 4);
+    let list = frames["frames"].as_array().unwrap();
+    assert_eq!(list.len(), 4, "three consecutive pairs plus the loop seam");
+    assert_eq!(
+        (&list[3]["index"], &list[3]["previous"]),
+        (&Value::from(0), &Value::from(3))
+    );
+    let total: u64 = list
+        .iter()
+        .map(|f| f["changed_pixels"].as_u64().unwrap())
+        .sum();
+    assert_eq!(frames["changed_pixels_total"].as_u64().unwrap(), total);
+    assert!(frames["union"]["changed_pixels"].as_u64().unwrap() <= total);
+
+    let (ok, _, err) = run_json(&["diff", "--frames", &path("a.png"), "--json"]);
+    assert!(!ok);
+    assert_eq!(err["code"], "INVALID_ARGUMENT");
+}

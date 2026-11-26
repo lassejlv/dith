@@ -43,6 +43,7 @@
 pub mod animate;
 pub mod color;
 pub mod compare;
+pub mod diff;
 pub mod dither;
 pub mod generate;
 pub mod ink;

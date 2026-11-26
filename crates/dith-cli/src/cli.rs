@@ -20,6 +20,7 @@ pub use crate::commands::animate::AnimateArgs;
 pub use crate::commands::apply::ApplyArgs;
 pub use crate::commands::batch::BatchArgs;
 pub use crate::commands::compare::CompareArgs;
+pub use crate::commands::diff::DiffArgs;
 pub use crate::commands::generate::GenerateArgs;
 pub use crate::commands::inspect::InspectArgs;
 pub use crate::commands::list::ListArgs;
@@ -28,9 +29,9 @@ pub use crate::commands::preview::PreviewArgs;
 pub use crate::commands::update::UpdateArgs;
 use crate::commands::{
     animate::handle_animate, apply::handle_apply, batch::handle_batch,
-    capabilities::handle_capabilities, compare::handle_compare, generate::handle_generate,
-    inspect::handle_inspect, list::handle_list, preset::handle_preset, preview::handle_preview,
-    update::handle_update,
+    capabilities::handle_capabilities, compare::handle_compare, diff::handle_diff,
+    generate::handle_generate, inspect::handle_inspect, list::handle_list, preset::handle_preset,
+    preview::handle_preview, update::handle_update,
 };
 
 /// Top-level CLI entrypoint.
@@ -68,6 +69,8 @@ pub enum Command {
     Compare(CompareArgs),
     /// Dither multiple input images in parallel into an output directory.
     Batch(BatchArgs),
+    /// Count, locate and highlight changed pixels between two images or consecutive animation frames.
+    Diff(DiffArgs),
     /// Analyze an image (dimensions, luminance, dominant colors) and recommend dithering commands.
     Inspect(InspectArgs),
     /// List available algorithms, palettes, presets, generators, or formats.
@@ -483,6 +486,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Preset(args) => handle_preset(&args, cli.json),
         Command::Compare(args) => handle_compare(&args, cli.json),
         Command::Batch(args) => handle_batch(&args, cli.json),
+        Command::Diff(args) => handle_diff(&args, cli.json),
         Command::Update(args) => handle_update(&args, cli.json),
     }
 }
