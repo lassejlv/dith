@@ -1,11 +1,12 @@
 //! Image resizing, tonal adjustment, sharpening/blurring, and alpha handling before dithering.
 
 use image::RgbaImage;
-use image::imageops::{self, FilterType};
+use image::imageops;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::{Rgb, linear_to_srgb_u8, srgb_u8_to_linear};
+use crate::resample::{resize_lanczos3, resize_nearest};
 
 /// How to fit an image when both `--width` and `--height` are specified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -173,7 +174,7 @@ pub fn prepare_image(src: &RgbaImage, opts: &PreprocessOptions) -> PreparedImage
     ) {
         resize_cover(src, final_w, final_h)
     } else {
-        imageops::resize(src, final_w, final_h, FilterType::Lanczos3)
+        resize_lanczos3(src, final_w, final_h)
     };
 
     // If pixel_size > 1, downscale to the coarse dither grid before tonal adjustments & dithering.
@@ -181,7 +182,7 @@ pub fn prepare_image(src: &RgbaImage, opts: &PreprocessOptions) -> PreparedImage
     if ps > 1 {
         let work_w = (final_w / ps).max(1);
         let work_h = (final_h / ps).max(1);
-        img = imageops::resize(&img, work_w, work_h, FilterType::Lanczos3);
+        img = resize_lanczos3(&img, work_w, work_h);
     }
 
     // Flatten alpha early so tonal/spatial filters don't bleed undefined RGB from transparent areas.
@@ -245,12 +246,7 @@ pub fn finalize_image(
     }
 
     if dithered.width() != prepared.final_width || dithered.height() != prepared.final_height {
-        imageops::resize(
-            &dithered,
-            prepared.final_width,
-            prepared.final_height,
-            FilterType::Nearest,
-        )
+        resize_nearest(&dithered, prepared.final_width, prepared.final_height)
     } else {
         dithered
     }
@@ -260,7 +256,7 @@ fn resize_cover(src: &RgbaImage, target_w: u32, target_h: u32) -> RgbaImage {
     let ratio = (target_w as f32 / src.width() as f32).max(target_h as f32 / src.height() as f32);
     let scaled_w = ((src.width() as f32) * ratio).ceil().max(target_w as f32) as u32;
     let scaled_h = ((src.height() as f32) * ratio).ceil().max(target_h as f32) as u32;
-    let scaled = imageops::resize(src, scaled_w, scaled_h, FilterType::Lanczos3);
+    let scaled = resize_lanczos3(src, scaled_w, scaled_h);
     let x = (scaled_w - target_w) / 2;
     let y = (scaled_h - target_h) / 2;
     imageops::crop_imm(&scaled, x, y, target_w, target_h).to_image()

@@ -55,6 +55,7 @@ pub mod recipe;
 
 mod nearest;
 mod png_optimize;
+mod resample;
 mod webp;
 
 pub use image;
