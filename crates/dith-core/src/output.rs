@@ -52,7 +52,8 @@ pub enum OutputFormat {
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum SvgShape {
-    /// Horizontal run-length merged crisp pixel runs, layered by color (smallest file size).
+    /// Run-length merged crisp pixel runs, layered by color, horizontal or vertical per color
+    /// (smallest file size).
     #[default]
     Rect,
     /// Circular stipple/halftone dots per non-background pixel.
@@ -335,9 +336,10 @@ const SVG_BARRIER: u32 = u32::MAX;
 
 /// Render a dithered image as a compact, crisp SVG.
 ///
-/// `Rect` mode strokes horizontal pixel runs as 1px-wide lines through the row centres, one
-/// `<path>` per color. Opaque colors are painted most frequent first and a run may pass under
-/// pixels a later color repaints, so runs merge.
+/// `Rect` mode strokes pixel runs as 1px-wide lines through the pixel centres, one `<path>`
+/// per color. Opaque colors are painted most frequent first and a run may pass under pixels a
+/// later color repaints, so runs merge; each color picks horizontal or vertical runs, whichever
+/// is shorter.
 /// Dot modes trace every dot as two filled semicircle arcs in one `<path>` per color. Colors use
 /// the shortest hex form, so files stay lean for web and design tooling.
 #[must_use]
@@ -368,7 +370,7 @@ pub fn render_svg(img: &RgbaImage, shape: SvgShape, skip_bg: bool) -> String {
     let skipped = |c: &[u8; 4]| c[3] == 0 || bg_color == Some([c[0], c[1], c[2]]);
 
     let body = match shape {
-        SvgShape::Rect => svg_runs(w, &colors, &counts, indices, skipped),
+        SvgShape::Rect => svg_runs(w, h, &colors, &counts, indices, skipped),
         SvgShape::Circle | SvgShape::Dot => svg_dots(w, shape, &colors, &indices, skipped),
     };
 
@@ -457,9 +459,11 @@ fn index_colors(img: &RgbaImage) -> IndexedColors {
 /// Stroke every pixel run of a `Rect` SVG, returning the `<g>` element (empty when nothing is drawn).
 ///
 /// Opaque colors become layers ordered by descending pixel count; translucent colors follow and
-/// keep their exact coverage. `skipped` marks colors that are never painted.
+/// keep their exact coverage. Each layer is traced along rows and along columns and keeps the
+/// shorter path. `skipped` marks colors that are never painted.
 fn svg_runs(
     w: u32,
+    h: u32,
     colors: &[[u8; 4]],
     counts: &[u64],
     mut codes: Vec<u32>,
@@ -491,10 +495,31 @@ fn svg_runs(
         *code = code_of[*code as usize];
     }
 
-    let paths = trace_runs(&codes, w as usize, opaque, layers.len());
+    let (across, down) = rayon::join(
+        || trace_runs(&codes, w as usize, opaque, layers.len(), false),
+        || {
+            let (w, h) = (w as usize, h as usize);
+            let mut columns = vec![SVG_BARRIER; codes.len()];
+            for y0 in (0..h).step_by(64) {
+                for x0 in (0..w).step_by(64) {
+                    for y in y0..h.min(y0 + 64) {
+                        for x in x0..w.min(x0 + 64) {
+                            columns[x * h + y] = codes[y * w + x];
+                        }
+                    }
+                }
+            }
+            trace_runs(&columns, h, opaque, layers.len(), true)
+        },
+    );
 
     let mut out = String::from("<g fill=\"none\">");
-    for (path, &i) in paths.iter().zip(&layers) {
+    for ((across, down), &i) in across.iter().zip(&down).zip(&layers) {
+        let path = if down.d.len() < across.d.len() {
+            down
+        } else {
+            across
+        };
         let rgba = colors[i];
         let mut stroke = format!("stroke=\"{}\"", svg_hex([rgba[0], rgba[1], rgba[2]]));
         if rgba[3] < 255 {
@@ -512,16 +537,23 @@ fn svg_runs(
     out
 }
 
-/// Trace the stroked runs of every layer along rows.
+/// Trace the stroked runs of every layer along consecutive lines of `length` pixels: rows, or
+/// columns when `vertical`.
 ///
 /// `codes` holds one paint class per pixel: a layer index, or [`SVG_BARRIER`]. Layers below
 /// `opaque` may run under pixels of any later opaque layer; the rest cover their own pixels only.
-fn trace_runs(codes: &[u32], width: usize, opaque: u32, layers: usize) -> Vec<RunPath> {
+fn trace_runs(
+    codes: &[u32],
+    length: usize,
+    opaque: u32,
+    layers: usize,
+    vertical: bool,
+) -> Vec<RunPath> {
     let mut out: Vec<RunPath> = (0..layers).map(|_| RunPath::default()).collect();
     let mut stack: Vec<(u32, u32, u32)> = Vec::new();
-    for (row, line) in codes.chunks(width.max(1)).zip(0u32..) {
+    for (row, line) in codes.chunks(length.max(1)).zip(0u32..) {
         let mut close = |(code, start, end): (u32, u32, u32)| {
-            out[code as usize].push(line, start, end - start);
+            out[code as usize].push(vertical, line, start, end - start);
         };
         let mut previous = SVG_BARRIER;
         for (&code, end) in row.iter().zip(1u32..) {
@@ -551,7 +583,7 @@ fn trace_runs(codes: &[u32], width: usize, opaque: u32, layers: usize) -> Vec<Ru
     out
 }
 
-/// Path data for 1px-wide horizontally stroked runs, with the pen position after the last run.
+/// Path data for 1px-wide stroked runs, with the pen position after the last run.
 #[derive(Default)]
 struct RunPath {
     d: String,
@@ -560,9 +592,9 @@ struct RunPath {
 }
 
 impl RunPath {
-    /// Append a run of `length` pixels starting `start` pixels into row `line`, moving there with
-    /// whichever of an absolute or a relative move is shorter.
-    fn push(&mut self, line: u32, start: u32, length: u32) {
+    /// Append a run of `length` pixels starting `start` pixels into row or column `line`, moving
+    /// there with whichever of an absolute or a relative move is shorter.
+    fn push(&mut self, vertical: bool, line: u32, start: u32, length: u32) {
         let d_along = i64::from(start) - i64::from(self.along);
         let d_line = i64::from(line) - i64::from(self.line);
         let absolute = 4
@@ -572,23 +604,40 @@ impl RunPath {
             } else {
                 decimal_len(i64::from(line))
             };
-        let relative = 2 + decimal_len(d_along) + decimal_len(d_line);
+        let relative =
+            1 + decimal_len(d_along) + decimal_len(d_line) + usize::from(!vertical || d_along >= 0);
         let d = &mut self.d;
         if d.is_empty() || absolute < relative {
+            let centre = |d: &mut String| {
+                if line > 0 {
+                    push_decimal(d, i64::from(line));
+                }
+                d.push_str(".5");
+            };
             d.push('M');
-            push_decimal(d, i64::from(start));
-            d.push(' ');
-            if line > 0 {
-                push_decimal(d, i64::from(line));
+            if vertical {
+                centre(d);
+                d.push(' ');
+                push_decimal(d, i64::from(start));
+            } else {
+                push_decimal(d, i64::from(start));
+                d.push(' ');
+                centre(d);
             }
-            d.push_str(".5");
         } else {
+            let (dx, dy) = if vertical {
+                (d_line, d_along)
+            } else {
+                (d_along, d_line)
+            };
             d.push('m');
-            push_decimal(d, d_along);
-            d.push(' ');
-            push_decimal(d, d_line);
+            push_decimal(d, dx);
+            if dy >= 0 {
+                d.push(' ');
+            }
+            push_decimal(d, dy);
         }
-        d.push('h');
+        d.push(if vertical { 'v' } else { 'h' });
         push_decimal(d, i64::from(length));
         self.along = start + length;
         self.line = line;
@@ -1601,11 +1650,14 @@ mod tests {
                         }
                     }
                 }
-                if name == "noise" {
+                if matches!(name, "noise" | "ordered") {
                     assert!(
                         painted.iter().any(|p| p.len() > 1),
                         "{name}: no run passes under a later color"
                     );
+                }
+                if name == "columns" {
+                    assert!(!svg.contains("h1") && svg.contains("v5"), "{svg}");
                 }
             }
         }
