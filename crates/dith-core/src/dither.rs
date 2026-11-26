@@ -1033,9 +1033,7 @@ fn riemersma_dither(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) ->
 
     let w = img.width();
     let h = img.height();
-    let max_dim = w.max(h).max(1);
-    let side = max_dim.next_power_of_two();
-    let total = u64::from(side) * u64::from(side);
+    let side = w.max(h).max(1).next_power_of_two();
     let mut weights = [0.0f32; QUEUE_LEN];
     let mut weight_sum = 0.0f32;
     for (i, slot) in weights.iter_mut().enumerate() {
@@ -1048,25 +1046,26 @@ fn riemersma_dither(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) ->
         *slot /= weight_sum;
     }
 
-    let mut err_queue = [[0.0f32; 3]; QUEUE_LEN];
-    let matcher = palette.matcher(opts.color_space);
-    let mut out = RgbaImage::new(w, h);
+    // The queue, oldest first, is `queue[oldest..oldest + QUEUE_LEN]`: every entry is stored twice,
+    // QUEUE_LEN apart, so the window never wraps.
+    let mut queue = [[0.0f32; 3]; 2 * QUEUE_LEN];
+    let mut oldest = 0;
+    let src = img.as_raw();
+    let mut dst = vec![0u8; src.len()];
     let strength = opts.strength.clamp(0.0, 1.5);
     let bias = opts.bias.clamp(-0.5, 0.5);
+    let matcher = palette.matcher(opts.color_space);
+    let colors = palette.colors();
 
-    for d in 0..total {
-        let (x, y) = hilbert_d2xy(side, d);
-        if x >= w || y >= h {
-            continue;
-        }
-        let px = *img.get_pixel(x, y);
+    hilbert_walk(side, w, h, &mut |x, y| {
+        let o = (y as usize * w as usize + x as usize) * 4;
+        let px = Rgba([src[o], src[o + 1], src[o + 2], src[o + 3]]);
         if px[3] == 0 {
-            out.put_pixel(x, y, Rgba([0, 0, 0, 0]));
-            continue;
+            return;
         }
 
         let mut acc = [0.0f32; 3];
-        for (q, &wt) in err_queue.iter().zip(weights.iter()) {
+        for (q, &wt) in queue[oldest..oldest + QUEUE_LEN].iter().zip(weights.iter()) {
             acc[0] += q[0] * wt;
             acc[1] += q[1] * wt;
             acc[2] += q[2] * wt;
@@ -1079,26 +1078,87 @@ fn riemersma_dither(img: &RgbaImage, palette: &Palette, opts: &DitherOptions) ->
             (work[2] + acc[2] * strength + bias).clamp(0.0, 1.0),
         ];
         let chosen_idx = matcher.nearest(sample);
-        let chosen_rgb: Rgb = palette.colors()[chosen_idx];
+        let chosen_rgb: Rgb = colors[chosen_idx];
         let chosen_work = palette_work_color(palette, chosen_idx, opts.color_space);
-        out.put_pixel(
-            x,
-            y,
-            Rgba([chosen_rgb.r, chosen_rgb.g, chosen_rgb.b, px[3]]),
-        );
+        dst[o..o + 4].copy_from_slice(&[chosen_rgb.r, chosen_rgb.g, chosen_rgb.b, px[3]]);
 
-        err_queue.rotate_left(1);
-        err_queue[QUEUE_LEN - 1] = [
+        let err = [
             work[0] - chosen_work[0],
             work[1] - chosen_work[1],
             work[2] - chosen_work[2],
         ];
-    }
+        queue[oldest] = err;
+        queue[oldest + QUEUE_LEN] = err;
+        oldest = (oldest + 1) % QUEUE_LEN;
+    });
 
-    out
+    RgbaImage::from_raw(w, h, dst).expect("exact RGBA buffer dimensions")
+}
+
+/// Visit the cells of the `side x side` Hilbert curve (`side` a power of two) that fall inside
+/// `width x height`, in curve order, skipping every sub-square that lies wholly outside.
+///
+/// The curve is the one `hilbert_d2xy` describes. Its top-level quadrants, in order, are
+/// lower-left, upper-left, upper-right, lower-right (x right, y up), and the sub-curve in each
+/// is the whole curve transposed, unchanged, unchanged, and anti-transposed respectively.
+/// `origin` and the signed unit vectors `ax` and `ay` map local curve coordinates to the image:
+/// `cell = origin + lx * ax + ly * ay`.
+fn hilbert_walk(side: u32, width: u32, height: u32, visit: &mut impl FnMut(u32, u32)) {
+    fn walk(
+        size: i64,
+        origin: [i64; 2],
+        ax: [i64; 2],
+        ay: [i64; 2],
+        bounds: [i64; 2],
+        visit: &mut impl FnMut(u32, u32),
+    ) {
+        // The square this call covers, in image coordinates.
+        let far = [
+            origin[0] + (size - 1) * (ax[0] + ay[0]),
+            origin[1] + (size - 1) * (ax[1] + ay[1]),
+        ];
+        if origin[0].min(far[0]) >= bounds[0] || origin[1].min(far[1]) >= bounds[1] {
+            return;
+        }
+        if size == 1 {
+            visit(origin[0] as u32, origin[1] as u32);
+            return;
+        }
+        let half = size / 2;
+        let at = |lx: i64, ly: i64| {
+            [
+                origin[0] + lx * ax[0] + ly * ay[0],
+                origin[1] + lx * ax[1] + ly * ay[1],
+            ]
+        };
+        let neg = |v: [i64; 2]| [-v[0], -v[1]];
+        // Lower-left, transposed: local (x, y) -> (y, x).
+        walk(half, at(0, 0), ay, ax, bounds, visit);
+        // Upper-left and upper-right, unchanged.
+        walk(half, at(0, half), ax, ay, bounds, visit);
+        walk(half, at(half, half), ax, ay, bounds, visit);
+        // Lower-right, anti-transposed: local (x, y) -> (half - 1 - y, half - 1 - x).
+        walk(
+            half,
+            at(2 * half - 1, half - 1),
+            neg(ay),
+            neg(ax),
+            bounds,
+            visit,
+        );
+    }
+    walk(
+        i64::from(side),
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [i64::from(width), i64::from(height)],
+        visit,
+    );
 }
 
 /// Convert Hilbert curve distance `d` on a `side x side` power-of-two grid into `(x, y)`.
+#[cfg(test)]
 fn hilbert_d2xy(side: u32, mut d: u64) -> (u32, u32) {
     let mut x = 0u32;
     let mut y = 0u32;
@@ -1351,6 +1411,31 @@ fn generate_void_and_cluster(size: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hilbert_walk_visits_in_bounds_cells_in_curve_order() {
+        for (w, h) in [
+            (1, 1),
+            (1, 9),
+            (9, 1),
+            (2, 2),
+            (3, 5),
+            (16, 16),
+            (17, 3),
+            (31, 64),
+            (100, 37),
+            (64, 65),
+        ] {
+            let side: u32 = u32::max(w, h).next_power_of_two();
+            let expected: Vec<(u32, u32)> = (0..u64::from(side) * u64::from(side))
+                .map(|d| hilbert_d2xy(side, d))
+                .filter(|&(x, y)| x < w && y < h)
+                .collect();
+            let mut visited = Vec::new();
+            hilbert_walk(side, w, h, &mut |x, y| visited.push((x, y)));
+            assert_eq!(visited, expected, "{w}x{h}");
+        }
+    }
 
     fn gradient_image(w: u32, h: u32) -> RgbaImage {
         let mut img = RgbaImage::new(w, h);
