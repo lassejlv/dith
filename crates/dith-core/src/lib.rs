@@ -46,6 +46,7 @@ pub mod compare;
 pub mod dither;
 pub mod generate;
 pub mod ink;
+pub mod input;
 pub mod inspect;
 pub mod output;
 pub mod palette;
@@ -53,6 +54,8 @@ pub mod preprocess;
 pub mod preset;
 pub mod recipe;
 pub mod resample;
+#[cfg(feature = "svg")]
+pub mod svg;
 
 mod nearest;
 mod png_optimize;

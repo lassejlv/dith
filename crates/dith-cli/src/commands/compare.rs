@@ -164,7 +164,7 @@ pub(crate) fn handle_compare(args: &CompareArgs, as_json: bool) -> Result<()> {
     }
 
     let src_img = match (&args.input, args.pattern) {
-        (Some(path), _) => load_input_image(path)?,
+        (Some(path), _) => load_input_image(path, Some(&base_recipe.preprocess))?,
         (None, pat) => generate_pattern(&GenerateOptions {
             pattern: pat.unwrap_or(Pattern::Sphere),
             width: args.tile_max_dim.max(240),
