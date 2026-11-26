@@ -12,7 +12,7 @@ use flate2::write::ZlibEncoder;
 use flate2::{Compress, Crc, FlushCompress};
 use rayon::prelude::*;
 
-const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+pub(crate) const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 
 /// Largest chunk payload allowed by the PNG specification.
 const MAX_CHUNK_LEN: usize = i32::MAX as usize;
@@ -533,7 +533,7 @@ fn parse_chunks(mut body: &[u8]) -> Result<Vec<Chunk<'_>>> {
     Ok(chunks)
 }
 
-fn write_chunk(out: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
+pub(crate) fn write_chunk(out: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
     let start = out.len();
     out.extend_from_slice(&kind);
