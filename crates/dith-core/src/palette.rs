@@ -419,14 +419,17 @@ pub(crate) fn extract_adaptive_palette_from_images(
         .sum();
     let stride = (total_pixels / 8192).max(1);
     let mut samples: Vec<Oklab> = Vec::with_capacity(total_pixels.min(8192));
-    let mut global_idx = 0usize;
+    // Every pixel whose index across all frames is a multiple of `stride`, in order.
+    let mut frame_start = 0usize;
     for img in frames {
-        for px in img.pixels() {
-            if global_idx.is_multiple_of(stride) && px[3] >= 16 {
+        let pixels = img.as_raw().as_chunks::<4>().0;
+        let first = (stride - frame_start % stride) % stride;
+        for px in pixels.iter().skip(first).step_by(stride) {
+            if px[3] >= 16 {
                 samples.push(Rgb::new(px[0], px[1], px[2]).to_oklab());
             }
-            global_idx += 1;
         }
+        frame_start += pixels.len();
     }
     if samples.is_empty() {
         return Palette::by_name("bw");
