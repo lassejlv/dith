@@ -1,16 +1,16 @@
 //! Maximum lossless PNG/APNG compression behind `--optimize`.
 //!
 //! Indexed palettes are tried in a few orders and every image stream (the `IDAT` image and each
-//! APNG `fdAT` frame) is re-filtered with the best of several PNG filter strategies. Candidates
-//! are ranked with the fast setting of this crate's DEFLATE encoder; the winners are compressed
-//! with its slow setting and with Zopfli, and the smallest stream is kept. All other chunks are
-//! kept as is. Indexed images skip the Brute filter strategy, which never beat the cheaper
-//! adaptive strategies on dithered palettes and costs seconds per image.
+//! APNG `fdAT` frame) is re-filtered with every PNG filter strategy. Candidates are ranked both
+//! with flate2 at its best level and with a cheap setting of this crate's DEFLATE encoder; the
+//! best few of either ranking are compressed with the encoder's slow setting and with Zopfli,
+//! and the smallest stream is kept. All other chunks are kept as is.
 
-use std::io::Read;
+use std::io::{Read, Write};
 
 use anyhow::{Context, Result, bail, ensure};
 use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
 use flate2::{Compress, Crc, FlushCompress};
 use rayon::prelude::*;
 
@@ -22,8 +22,7 @@ pub(crate) const SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 /// Largest chunk payload allowed by the PNG specification.
 const MAX_CHUNK_LEN: usize = i32::MAX as usize;
 
-/// How many of the best filter strategies, ranked by a fast trial compression, are compressed at
-/// full effort.
+/// How many of the best filter strategies of each ranking are compressed at full effort.
 const FINALISTS: usize = 2;
 
 /// Rows of already filtered output the `Brute` strategy compresses along with each candidate row.
@@ -206,64 +205,41 @@ pub(crate) fn recompress_with(stored: &[u8], search: Search) -> Result<Vec<u8>> 
     };
 
     let bpp = bits_per_pixel.div_ceil(8);
-    let strategies: &[Strategy] = match (search, indexed, depth) {
-        (Search::Fast, true, _) => &STRATEGIES[..1],
-        (Search::Fast, false, _) => &[Strategy::MinSum],
-        (Search::Max, true, _) => &STRATEGIES[..STRATEGIES.len() - 1],
-        (Search::Max, false, _) => &STRATEGIES,
+    let strategies: &[Strategy] = match (search, indexed) {
+        (Search::Fast, true) => &STRATEGIES[..1],
+        (Search::Fast, false) => &[Strategy::MinSum],
+        (Search::Max, _) => &STRATEGIES,
     };
-    let trial_effort = match search {
-        Search::Fast => Effort::DEFAULT,
-        Search::Max => Effort::TRIAL,
-    };
-    let (palette, finalists) = candidates
+    let ranked: Vec<Ranked> = candidates
         .into_par_iter()
         .map(|(palette, images)| {
-            let finalists: Vec<Vec<Trial>> = images
+            let trials = images
                 .par_iter()
                 .zip(frames.par_iter())
                 .map(|(raw, &(width, _))| {
                     let row_len = (width * bits_per_pixel).div_ceil(8);
-                    trial_filters(raw, row_len, bpp, strategies, trial_effort)
+                    trial_filters(raw, row_len, bpp, strategies, search)
                 })
-                .collect();
-            let total: usize = finalists.iter().map(|f| f[0].compressed.len()).sum();
-            (total, palette, finalists)
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .min_by_key(|(total, _, _)| *total)
-        .map(|(_, palette, finalists)| (palette, finalists))
-        .context("PNG stream has no image data")?;
-
-    let mut streams = finalists
-        .into_par_iter()
-        .map(|mut trials| {
-            if search == Search::Fast {
-                return Ok(std::mem::take(&mut trials[0].compressed));
-            }
-            trials
-                .into_par_iter()
-                .flat_map(|trial| {
-                    let mut zopfli = Vec::new();
-                    let zopfli = zopfli::compress(
-                        zopfli::Options::default(),
-                        zopfli::Format::Zlib,
-                        trial.filtered.as_slice(),
-                        &mut zopfli,
-                    )
-                    .map(|()| zopfli);
-                    [
-                        Ok(zlib_compress(&trial.filtered, trial.stride, Effort::HIGH)),
-                        zopfli,
-                    ]
-                })
-                .collect::<std::io::Result<Vec<_>>>()
-                .map(|s| s.into_iter().min_by_key(Vec::len).unwrap_or_default())
+                .collect::<std::io::Result<Vec<_>>>()?;
+            Ok((palette, trials))
         })
         .collect::<std::io::Result<Vec<_>>>()
-        .context("compressing PNG image data with Zopfli")?
-        .into_iter();
+        .context("trial-compressing PNG filter strategies")?;
+
+    let (palette, streams) = if search == Search::Fast {
+        let (palette, trials) = ranked
+            .into_iter()
+            .next()
+            .context("PNG stream has no image data")?;
+        let streams: Vec<Vec<u8>> = trials
+            .into_iter()
+            .map(|mut frame| std::mem::take(&mut frame[0].compressed))
+            .collect();
+        (palette, streams)
+    } else {
+        best_streams(ranked)?
+    };
+    let mut streams = streams.into_iter();
 
     let mut out = SIGNATURE.to_vec();
     let mut sequence = 0u32;
@@ -384,39 +360,131 @@ fn unfiltered_scanlines(zlib: &[u8], width: usize, bits_per_pixel: usize) -> Res
     Ok(raw)
 }
 
+/// One palette order with the trials of every image stream.
+type Ranked = (Vec<[u8; 4]>, Vec<Vec<Trial>>);
+
+/// The chosen palette order and the compressed zlib stream of every image stream.
+type Recompressed = (Vec<[u8; 4]>, Vec<Vec<u8>>);
+
 /// One filtered candidate for an image stream.
 struct Trial {
-    /// The filtered scanlines compressed at the fast trial effort.
+    /// The filtered scanlines compressed with the fast DEFLATE setting (the cheap trial setting
+    /// for [`Search::Max`]).
     compressed: Vec<u8>,
+    /// Size with flate2 at its best level, the ranking used before this crate had its own
+    /// encoder (0 for [`Search::Fast`]).
+    flate: usize,
     stride: usize,
     filtered: Vec<u8>,
 }
 
-/// Filter `raw` with each of `strategies` and return the [`FINALISTS`] distinct results that
-/// compress smallest at a fast trial effort, smallest first.
+/// Filter `raw` with each of `strategies` and trial-compress every result.
 fn trial_filters(
     raw: &[u8],
     row_len: usize,
     bpp: usize,
     strategies: &[Strategy],
-    effort: Effort,
-) -> Vec<Trial> {
+    search: Search,
+) -> std::io::Result<Vec<Trial>> {
     let stride = row_len + 1;
-    let mut trials: Vec<Trial> = strategies
+    strategies
         .par_iter()
         .map(|&strategy| {
             let filtered = apply_strategy(strategy, raw, row_len, bpp);
-            Trial {
-                compressed: zlib_compress(&filtered, stride, effort),
+            let (compressed, flate) = match search {
+                Search::Fast => (zlib_compress(&filtered, stride, Effort::DEFAULT), 0),
+                Search::Max => {
+                    let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+                    encoder.write_all(&filtered)?;
+                    let flate = encoder.finish()?.len();
+                    (zlib_compress(&filtered, stride, Effort::TRIAL), flate)
+                }
+            };
+            Ok(Trial {
+                compressed,
+                flate,
                 stride,
                 filtered,
-            }
+            })
         })
+        .collect()
+}
+
+/// The palette order and image streams with the smallest total size.
+///
+/// Two rankings pick the palette order and the [`FINALISTS`] best filter strategies of every
+/// stream: flate2 at its best level and the crate's own encoder. Each finalist of either ranking
+/// is compressed with Zopfli and with the slow setting of the own encoder, and the smallest
+/// stream wins, so the result is never larger than what the flate2 ranking alone would give.
+fn best_streams(ranked: Vec<Ranked>) -> Result<Recompressed> {
+    let total = |trials: &[Vec<Trial>], size: fn(&Trial) -> usize| -> usize {
+        trials
+            .iter()
+            .map(|frame| frame.iter().map(size).min().unwrap_or(0))
+            .sum()
+    };
+    let flate_size: fn(&Trial) -> usize = |t| t.flate;
+    let own_size: fn(&Trial) -> usize = |t| t.compressed.len();
+    let pick = |size: fn(&Trial) -> usize| {
+        (0..ranked.len()).min_by_key(|&i| (total(&ranked[i].1, size), i))
+    };
+    let mut orders: Vec<usize> = [pick(flate_size), pick(own_size)]
+        .into_iter()
+        .flatten()
         .collect();
-    trials.sort_by_key(|trial| trial.compressed.len());
-    trials.dedup_by(|a, b| a.filtered == b.filtered);
-    trials.truncate(FINALISTS);
-    trials
+    orders.dedup();
+
+    let mut best: Option<(usize, usize, Vec<Vec<u8>>)> = None;
+    for order in orders {
+        let streams = ranked[order]
+            .1
+            .par_iter()
+            .map(|trials| {
+                let mut finalists: Vec<&Trial> = Vec::new();
+                for size in [flate_size, own_size] {
+                    let mut ranking: Vec<usize> = (0..trials.len()).collect();
+                    ranking.sort_by_key(|&i| (size(&trials[i]), i));
+                    for &i in ranking.iter().take(FINALISTS) {
+                        if !finalists.iter().any(|f| f.filtered == trials[i].filtered) {
+                            finalists.push(&trials[i]);
+                        }
+                    }
+                }
+                finalists
+                    .into_par_iter()
+                    .flat_map(|trial| {
+                        let mut zopfli = Vec::new();
+                        let zopfli = zopfli::compress(
+                            zopfli::Options::default(),
+                            zopfli::Format::Zlib,
+                            trial.filtered.as_slice(),
+                            &mut zopfli,
+                        )
+                        .map(|()| zopfli);
+                        [
+                            Ok(zlib_compress(&trial.filtered, trial.stride, Effort::HIGH)),
+                            zopfli,
+                        ]
+                    })
+                    .collect::<std::io::Result<Vec<_>>>()
+                    .map(|s| s.into_iter().min_by_key(Vec::len).unwrap_or_default())
+            })
+            .collect::<std::io::Result<Vec<_>>>()
+            .context("compressing PNG image data with Zopfli")?;
+        let size: usize = streams.iter().map(Vec::len).sum();
+        if best
+            .as_ref()
+            .is_none_or(|(best_size, _, _)| size < *best_size)
+        {
+            best = Some((size, order, streams));
+        }
+    }
+    let (_, order, streams) = best.context("PNG stream has no image data")?;
+    let palette = ranked
+        .into_iter()
+        .nth(order)
+        .map_or_else(Vec::new, |(palette, _)| palette);
+    Ok((palette, streams))
 }
 
 /// Filter every `row_len`-byte scanline of `raw`, prefixing each with its filter type byte.
