@@ -139,7 +139,7 @@ Choose one source.
 
 - `-f, --format png|webp|jpeg|gif|bmp|tiff|svg|kitty|braille|ascii`, inferred from the `-o` extension. Stdout (`-o -`) defaults to PNG.
 - SVG: `--svg-shape rect|circle|dot`, `--svg-skip-bg`
-- `--optimize`: smallest lossless PNG, APNG, spritesheet, and PNG frames (palette order and filter search plus Zopfli). Pixels are identical; encoding takes several times longer. Recorded in recipes as `export.optimize`.
+- `--optimize`: smallest lossless PNG, APNG, spritesheet, and PNG frames (palette order and filter search plus Zopfli), and JPEG with Huffman tables fitted to the image. Pixels are identical; PNG encoding takes several times longer. Recorded in recipes as `export.optimize`.
 - Text: `--text-width <cols>` for braille and ascii
 - Kitty: `--view-cols`, `--view-rows`
 

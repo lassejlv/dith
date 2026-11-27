@@ -262,7 +262,8 @@ pub struct DitherFlags {
     #[arg(long)]
     pub view_rows: Option<u32>,
 
-    /// Spend extra CPU for the smallest lossless PNG/APNG (palette, filter, and Zopfli search).
+    /// Spend extra CPU for the smallest PNG/APNG (palette, filter, and Zopfli search) and JPEG
+    /// (Huffman tables fitted to the image). Decoded pixels are identical.
     #[arg(long)]
     pub optimize: bool,
 }
