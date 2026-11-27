@@ -3,11 +3,9 @@
 //! Indexed palettes are tried in a few orders and every image stream (the `IDAT` image and each
 //! APNG `fdAT` frame) is re-filtered with the best of several PNG filter strategies. Candidates
 //! are ranked with the fast setting of this crate's DEFLATE encoder; the winners are compressed
-//! with its slow setting and with Zopfli, and the smaller stream is kept. All other chunks are
-//! kept as is.
-//!
-//! Packed indexed scanlines (1, 2 or 4 bits per pixel) are only tried unfiltered: byte-wise PNG
-//! filters scramble packed dither patterns and never win there.
+//! with its slow setting and with Zopfli, and the smallest stream is kept. All other chunks are
+//! kept as is. Indexed images skip the Brute filter strategy, which never beat the cheaper
+//! adaptive strategies on dithered palettes and costs seconds per image.
 
 use std::io::Read;
 
@@ -209,7 +207,7 @@ pub(crate) fn recompress_with(stored: &[u8], search: Search) -> Result<Vec<u8>> 
 
     let bpp = bits_per_pixel.div_ceil(8);
     let strategies: &[Strategy] = match (search, indexed, depth) {
-        (Search::Fast, true, _) | (Search::Max, true, 1 | 2 | 4) => &STRATEGIES[..1],
+        (Search::Fast, true, _) => &STRATEGIES[..1],
         (Search::Fast, false, _) => &[Strategy::MinSum],
         (Search::Max, true, _) => &STRATEGIES[..STRATEGIES.len() - 1],
         (Search::Max, false, _) => &STRATEGIES,
@@ -241,26 +239,19 @@ pub(crate) fn recompress_with(stored: &[u8], search: Search) -> Result<Vec<u8>> 
             }
             trials
                 .into_par_iter()
-                .enumerate()
-                .flat_map(|(rank, trial)| {
-                    let mut streams = vec![Ok(zlib_compress(
-                        &trial.filtered,
-                        trial.stride,
-                        Effort::HIGH,
-                    ))];
-                    if rank == 0 {
-                        let mut out = Vec::new();
-                        streams.push(
-                            zopfli::compress(
-                                zopfli::Options::default(),
-                                zopfli::Format::Zlib,
-                                trial.filtered.as_slice(),
-                                &mut out,
-                            )
-                            .map(|()| out),
-                        );
-                    }
-                    streams
+                .flat_map(|trial| {
+                    let mut zopfli = Vec::new();
+                    let zopfli = zopfli::compress(
+                        zopfli::Options::default(),
+                        zopfli::Format::Zlib,
+                        trial.filtered.as_slice(),
+                        &mut zopfli,
+                    )
+                    .map(|()| zopfli);
+                    [
+                        Ok(zlib_compress(&trial.filtered, trial.stride, Effort::HIGH)),
+                        zopfli,
+                    ]
                 })
                 .collect::<std::io::Result<Vec<_>>>()
                 .map(|s| s.into_iter().min_by_key(Vec::len).unwrap_or_default())
