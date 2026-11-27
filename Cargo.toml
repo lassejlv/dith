@@ -24,7 +24,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 thiserror = "2"
-tiff = { version = "0.11", default-features = false, features = ["deflate"] }
 zopfli = { version = "0.8", default-features = false, features = ["std", "zlib"] }
 
 [workspace.lints.rust]

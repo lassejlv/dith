@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use dith_core::output::SvgShape;
 use dith_core::{ExportOptions, OutputFormat, encode_image};
 
-const ALL_FORMATS: &str = "png,png-opt,webp,gif,bmp,tiff,jpeg,svg,svg-circle";
+const ALL_FORMATS: &str = "png,png-opt,webp,gif,bmp,tiff,jpeg,jpeg-opt,svg,svg-circle";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -73,6 +73,10 @@ fn main() -> Result<()> {
                 "bmp" => (OutputFormat::Bmp, "bmp"),
                 "tiff" => (OutputFormat::Tiff, "tiff"),
                 "jpeg" => (OutputFormat::Jpeg, "jpg"),
+                "jpeg-opt" => {
+                    export.optimize = true;
+                    (OutputFormat::Jpeg, "opt.jpg")
+                }
                 "svg" => (OutputFormat::Svg, "svg"),
                 "svg-circle" => {
                     export.svg_shape = SvgShape::Circle;

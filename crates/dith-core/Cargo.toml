@@ -24,7 +24,6 @@ resvg = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tiff.workspace = true
 zopfli.workspace = true
 
 [dev-dependencies]

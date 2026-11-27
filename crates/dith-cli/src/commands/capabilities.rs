@@ -436,7 +436,7 @@ pub fn build_capabilities() -> CapabilitiesManifest {
                 value_type: "bool",
                 range: "true | false",
                 default: "false",
-                effect: "Smallest lossless PNG/APNG/spritesheet via palette-order and filter search plus Zopfli (encodes several times slower)",
+                effect: "Smallest lossless PNG/APNG/spritesheet via palette-order and filter search plus Zopfli, and JPEG with Huffman tables fitted to the image; pixels are identical (PNG encodes several times slower)",
             },
         ],
         default_recipe: DitherRecipe::default(),
