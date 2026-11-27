@@ -212,6 +212,10 @@ pub(crate) fn recompress_with(stored: &[u8], search: Search) -> Result<Vec<u8>> 
         (Search::Max, true, _) => &STRATEGIES[..STRATEGIES.len() - 1],
         (Search::Max, false, _) => &STRATEGIES,
     };
+    let trial_effort = match search {
+        Search::Fast => Effort::DEFAULT,
+        Search::Max => Effort::TRIAL,
+    };
     let (palette, finalists) = candidates
         .into_par_iter()
         .map(|(palette, images)| {
@@ -219,7 +223,8 @@ pub(crate) fn recompress_with(stored: &[u8], search: Search) -> Result<Vec<u8>> 
                 .par_iter()
                 .zip(frames.par_iter())
                 .map(|(raw, &(width, _))| {
-                    trial_filters(raw, (width * bits_per_pixel).div_ceil(8), bpp, strategies)
+                    let row_len = (width * bits_per_pixel).div_ceil(8);
+                    trial_filters(raw, row_len, bpp, strategies, trial_effort)
                 })
                 .collect();
             let total: usize = finalists.iter().map(|f| f[0].compressed.len()).sum();
@@ -389,14 +394,20 @@ struct Trial {
 
 /// Filter `raw` with each of `strategies` and return the [`FINALISTS`] distinct results that
 /// compress smallest at a fast trial effort, smallest first.
-fn trial_filters(raw: &[u8], row_len: usize, bpp: usize, strategies: &[Strategy]) -> Vec<Trial> {
+fn trial_filters(
+    raw: &[u8],
+    row_len: usize,
+    bpp: usize,
+    strategies: &[Strategy],
+    effort: Effort,
+) -> Vec<Trial> {
     let stride = row_len + 1;
     let mut trials: Vec<Trial> = strategies
         .par_iter()
         .map(|&strategy| {
             let filtered = apply_strategy(strategy, raw, row_len, bpp);
             Trial {
-                compressed: zlib_compress(&filtered, stride, Effort::DEFAULT),
+                compressed: zlib_compress(&filtered, stride, effort),
                 stride,
                 filtered,
             }
