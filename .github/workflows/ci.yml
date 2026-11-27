@@ -53,3 +53,41 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  glibc-floor:
+    name: glibc floor (x86_64 release)
+    runs-on: ubuntu-24.04
+    env:
+      # Highest glibc symbol version the release binary may import. Keep in sync with release.yml.
+      GLIBC_MAX: "2.39"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Check glibc symbol floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/release/dith"
+          objdump -T "$bin" \
+            | awk '{ for (i = 1; i < NF; i++) if ($i ~ /^\(?GLIBC_[0-9.]+\)?$/) { v = $i; gsub(/[()]|GLIBC_/, "", v); print v, $NF } }' \
+            | sort -u > glibc-syms.txt
+          bad=0
+          while read -r ver sym; do
+            if [ "$(printf '%s\n%s\n' "$ver" "$GLIBC_MAX" | sort -V | tail -n1)" != "$GLIBC_MAX" ]; then
+              echo "::error::$sym needs GLIBC_$ver (ceiling is GLIBC_$GLIBC_MAX)"
+              bad=1
+            fi
+          done < glibc-syms.txt
+          rm -f glibc-syms.txt
+          if [ "$bad" -ne 0 ]; then exit 1; fi
+          echo "OK: $bin needs nothing newer than GLIBC_$GLIBC_MAX"
