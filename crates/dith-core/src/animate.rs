@@ -1353,7 +1353,8 @@ impl GifCanvas<'_> {
 /// When every changed pixel in that box is opaque, the frame may instead be blended over the canvas
 /// with its unchanged pixels fully transparent, so static areas inside the box compress to almost
 /// nothing; see [`blend_unchanged_over`] for how that is chosen.
-/// With `optimize`, every frame is re-filtered and compressed with Zopfli for the smallest file.
+/// Every frame is compressed with the crate's DEFLATE encoder; with `optimize`, frames are also
+/// re-filtered and tried with Zopfli for the smallest file.
 ///
 /// # Errors
 /// Returns an error if frames are empty or PNG encoding fails.
@@ -1399,14 +1400,7 @@ pub fn encode_apng(frames: &[AnimFrame], loops: u32, optimize: bool) -> Result<V
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, w, h);
-        layout.configure(
-            &mut encoder,
-            if optimize {
-                png::Compression::NoCompression
-            } else {
-                png::Compression::High
-            },
-        );
+        layout.configure(&mut encoder, png::Compression::NoCompression);
         encoder
             .set_animated(num_frames, loops)
             .context("configuring APNG animation header")?;
@@ -1435,11 +1429,14 @@ pub fn encode_apng(frames: &[AnimFrame], loops: u32, optimize: bool) -> Result<V
         }
         writer.finish().context("finalizing APNG stream")?;
     }
-    if optimize {
-        crate::png_optimize::recompress(&out)
-    } else {
-        Ok(out)
-    }
+    crate::png_optimize::recompress_with(
+        &out,
+        if optimize {
+            crate::png_optimize::Search::Max
+        } else {
+            crate::png_optimize::Search::Fast
+        },
+    )
 }
 
 /// Over blending is used only where its trial size is below this many 1024ths of the Source
