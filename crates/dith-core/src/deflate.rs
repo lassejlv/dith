@@ -64,6 +64,11 @@ impl Effort {
         chain_limit: 32,
         refinements: 4,
     };
+    /// Cheap enough to rank many `--optimize` candidates before the finalists are compressed.
+    pub(crate) const TRIAL: Self = Self {
+        chain_limit: 8,
+        refinements: 0,
+    };
     /// Slower, for `--optimize`.
     pub(crate) const HIGH: Self = Self {
         chain_limit: 1024,
