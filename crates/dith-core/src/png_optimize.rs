@@ -79,12 +79,30 @@ enum Segment<'a> {
     },
 }
 
+/// How hard [`recompress_with`] searches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Search {
+    /// The original palette order, unfiltered indexed scanlines (adaptively filtered truecolor
+    /// ones) and the fast setting of the DEFLATE encoder.
+    Fast,
+    /// Every palette order and filter strategy, the slow encoder setting and Zopfli.
+    Max,
+}
+
 /// Recompress a non-interlaced PNG or APNG whose image data was written unfiltered (as the `png`
 /// crate does with `Compression::NoCompression`) into the smallest stream this module can find.
 ///
 /// # Errors
 /// Returns an error if the input is not such a PNG or recompression fails.
 pub(crate) fn recompress(stored: &[u8]) -> Result<Vec<u8>> {
+    recompress_with(stored, Search::Max)
+}
+
+/// Like [`recompress`], searching as hard as `search` says.
+///
+/// # Errors
+/// Returns an error if the input is not such a PNG or recompression fails.
+pub(crate) fn recompress_with(stored: &[u8], search: Search) -> Result<Vec<u8>> {
     let chunks = parse_chunks(
         stored
             .strip_prefix(&SIGNATURE)
@@ -161,7 +179,7 @@ pub(crate) fn recompress(stored: &[u8]) -> Result<Vec<u8>> {
             _ => None,
         })
         .collect();
-    let candidates = if indexed {
+    let candidates = if indexed && search == Search::Max {
         palette_orders(&palette, &frames, depth)
             .into_iter()
             .map(|order| {
@@ -190,10 +208,11 @@ pub(crate) fn recompress(stored: &[u8]) -> Result<Vec<u8>> {
     };
 
     let bpp = bits_per_pixel.div_ceil(8);
-    let strategies: &[Strategy] = match (indexed, depth) {
-        (true, 1 | 2 | 4) => &STRATEGIES[..1],
-        (true, _) => &STRATEGIES[..STRATEGIES.len() - 1],
-        (false, _) => &STRATEGIES,
+    let strategies: &[Strategy] = match (search, indexed, depth) {
+        (Search::Fast, true, _) | (Search::Max, true, 1 | 2 | 4) => &STRATEGIES[..1],
+        (Search::Fast, false, _) => &[Strategy::MinSum],
+        (Search::Max, true, _) => &STRATEGIES[..STRATEGIES.len() - 1],
+        (Search::Max, false, _) => &STRATEGIES,
     };
     let (palette, finalists) = candidates
         .into_par_iter()
@@ -205,7 +224,7 @@ pub(crate) fn recompress(stored: &[u8]) -> Result<Vec<u8>> {
                     trial_filters(raw, (width * bits_per_pixel).div_ceil(8), bpp, strategies)
                 })
                 .collect();
-            let total: usize = finalists.iter().map(|f| f[0].size).sum();
+            let total: usize = finalists.iter().map(|f| f[0].compressed.len()).sum();
             (total, palette, finalists)
         })
         .collect::<Vec<_>>()
@@ -216,7 +235,10 @@ pub(crate) fn recompress(stored: &[u8]) -> Result<Vec<u8>> {
 
     let mut streams = finalists
         .into_par_iter()
-        .map(|trials| {
+        .map(|mut trials| {
+            if search == Search::Fast {
+                return Ok(std::mem::take(&mut trials[0].compressed));
+            }
             trials
                 .into_par_iter()
                 .enumerate()
@@ -368,8 +390,8 @@ fn unfiltered_scanlines(zlib: &[u8], width: usize, bits_per_pixel: usize) -> Res
 
 /// One filtered candidate for an image stream.
 struct Trial {
-    /// Compressed size at the fast trial effort.
-    size: usize,
+    /// The filtered scanlines compressed at the fast trial effort.
+    compressed: Vec<u8>,
     stride: usize,
     filtered: Vec<u8>,
 }
@@ -383,13 +405,13 @@ fn trial_filters(raw: &[u8], row_len: usize, bpp: usize, strategies: &[Strategy]
         .map(|&strategy| {
             let filtered = apply_strategy(strategy, raw, row_len, bpp);
             Trial {
-                size: zlib_compress(&filtered, stride, Effort::DEFAULT).len(),
+                compressed: zlib_compress(&filtered, stride, Effort::DEFAULT),
                 stride,
                 filtered,
             }
         })
         .collect();
-    trials.sort_by_key(|trial| trial.size);
+    trials.sort_by_key(|trial| trial.compressed.len());
     trials.dedup_by(|a, b| a.filtered == b.filtered);
     trials.truncate(FINALISTS);
     trials
