@@ -17,11 +17,14 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    env:
+      # Highest glibc symbol version a Linux binary may import. ubuntu-24.04 ships 2.39.
+      GLIBC_MAX: "2.39"
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
@@ -46,6 +49,26 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Check glibc symbol floor
+        if: contains(matrix.target, 'linux-gnu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/dith"
+          objdump -T "$bin" \
+            | awk '{ for (i = 1; i < NF; i++) if ($i ~ /^\(?GLIBC_[0-9.]+\)?$/) { v = $i; gsub(/[()]|GLIBC_/, "", v); print v, $NF } }' \
+            | sort -u > glibc-syms.txt
+          bad=0
+          while read -r ver sym; do
+            if [ "$(printf '%s\n%s\n' "$ver" "$GLIBC_MAX" | sort -V | tail -n1)" != "$GLIBC_MAX" ]; then
+              echo "::error::$sym needs GLIBC_$ver (ceiling is GLIBC_$GLIBC_MAX)"
+              bad=1
+            fi
+          done < glibc-syms.txt
+          rm -f glibc-syms.txt
+          if [ "$bad" -ne 0 ]; then exit 1; fi
+          echo "OK: $bin needs nothing newer than GLIBC_$GLIBC_MAX"
 
       - name: Package tarball and checksum
         shell: bash
