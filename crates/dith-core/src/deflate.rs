@@ -62,7 +62,7 @@ impl Effort {
     /// Fast enough for default output.
     pub(crate) const DEFAULT: Self = Self {
         chain_limit: 32,
-        refinements: 4,
+        refinements: 1,
     };
     /// Cheap enough to rank many `--optimize` candidates before the finalists are compressed.
     pub(crate) const TRIAL: Self = Self {
